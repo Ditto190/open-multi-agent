@@ -1,6 +1,6 @@
 # Open Multi-Agent
 
-Build AI agent teams that work together. One agent plans, another implements, a third reviews — the framework handles task scheduling, dependencies, and communication automatically.
+Build AI agent teams that decompose goals into tasks automatically. Define agents with roles and tools, describe a goal — the framework plans the task graph, schedules dependencies, and runs everything in parallel.
 
 [![GitHub stars](https://img.shields.io/github/stars/JackChen-me/open-multi-agent)](https://github.com/JackChen-me/open-multi-agent/stargazers)
 [![license](https://img.shields.io/github/license/JackChen-me/open-multi-agent)](./LICENSE)
@@ -10,6 +10,7 @@ Build AI agent teams that work together. One agent plans, another implements, a 
 
 ## Why Open Multi-Agent?
 
+- **Auto Task Decomposition** — Describe a goal in plain text. A built-in coordinator agent breaks it into a task DAG with dependencies and assignees — no manual orchestration needed.
 - **Multi-Agent Teams** — Define agents with different roles, tools, and even different models. They collaborate through a message bus and shared memory.
 - **Task DAG Scheduling** — Tasks have dependencies. The framework resolves them topologically — dependent tasks wait, independent tasks run in parallel.
 - **Model Agnostic** — Claude, GPT, and local models (Ollama, vLLM, LM Studio) in the same team. Swap models per agent via `baseURL`.
@@ -87,6 +88,20 @@ const result = await orchestrator.runTeam(team, 'Create a REST API for a todo li
 console.log(`Success: ${result.success}`)
 console.log(`Tokens: ${result.totalTokenUsage.output_tokens} output tokens`)
 ```
+
+## Three Ways to Run
+
+| Mode | Method | When to use |
+|------|--------|-------------|
+| Single agent | `runAgent()` | One agent, one prompt — simplest entry point |
+| Auto-orchestrated team | `runTeam()` | Give a goal, framework plans and executes |
+| Explicit pipeline | `runTasks()` | You define the task graph and assignments |
+
+## Contributors
+
+<a href="https://github.com/JackChen-me/open-multi-agent/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=JackChen-me/open-multi-agent" />
+</a>
 
 ## More Examples
 
@@ -287,13 +302,7 @@ Issues, feature requests, and PRs are welcome. Some areas where contributions wo
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=JackChen-me/open-multi-agent&type=Date&v=20260402)](https://star-history.com/#JackChen-me/open-multi-agent&Date)
-
-## Contributors
-
-<a href="https://github.com/JackChen-me/open-multi-agent/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=JackChen-me/open-multi-agent" />
-</a>
+[![Star History Chart](https://api.star-history.com/svg?repos=JackChen-me/open-multi-agent&type=Date&v=20260402b)](https://star-history.com/#JackChen-me/open-multi-agent&Date)
 
 ## License
 

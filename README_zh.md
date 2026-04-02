@@ -1,6 +1,6 @@
 # Open Multi-Agent
 
-构建能协同工作的 AI 智能体团队。一个智能体负责规划，一个负责实现，一个负责审查——框架自动处理任务调度、依赖关系和智能体间通信。
+构建能自动拆解目标的 AI 智能体团队。定义智能体的角色和工具，描述一个目标——框架自动规划任务图、调度依赖、并行执行。
 
 [![GitHub stars](https://img.shields.io/github/stars/JackChen-me/open-multi-agent)](https://github.com/JackChen-me/open-multi-agent/stargazers)
 [![license](https://img.shields.io/github/license/JackChen-me/open-multi-agent)](./LICENSE)
@@ -10,6 +10,7 @@
 
 ## 为什么选择 Open Multi-Agent？
 
+- **自动任务拆解** — 用自然语言描述目标，内置的协调者智能体自动将其拆解为带依赖关系和分配的任务图——无需手动编排。
 - **多智能体团队** — 定义不同角色、工具甚至不同模型的智能体。它们通过消息总线和共享内存协作。
 - **任务 DAG 调度** — 任务之间存在依赖关系。框架进行拓扑排序——有依赖的任务等待，无依赖的任务并行执行。
 - **模型无关** — Claude、GPT 和本地模型（Ollama、vLLM、LM Studio）可以在同一个团队中使用。通过 `baseURL` 即可接入任何 OpenAI 兼容服务。
@@ -91,6 +92,20 @@ const result = await orchestrator.runTeam(team, 'Create a REST API for a todo li
 console.log(`成功: ${result.success}`)
 console.log(`Token 用量: ${result.totalTokenUsage.output_tokens} output tokens`)
 ```
+
+## 三种运行模式
+
+| 模式 | 方法 | 适用场景 |
+|------|------|----------|
+| 单智能体 | `runAgent()` | 一个智能体，一个提示词——最简入口 |
+| 自动编排团队 | `runTeam()` | 给一个目标，框架自动规划和执行 |
+| 显式任务管线 | `runTasks()` | 你自己定义任务图和分配 |
+
+## 贡献者
+
+<a href="https://github.com/JackChen-me/open-multi-agent/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=JackChen-me/open-multi-agent" />
+</a>
 
 ## 更多示例
 
@@ -291,13 +306,7 @@ for await (const event of agent.stream('Explain monads in two sentences.')) {
 
 ## Star 趋势
 
-[![Star History Chart](https://api.star-history.com/svg?repos=JackChen-me/open-multi-agent&type=Date&v=20260402)](https://star-history.com/#JackChen-me/open-multi-agent&Date)
-
-## 贡献者
-
-<a href="https://github.com/JackChen-me/open-multi-agent/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=JackChen-me/open-multi-agent" />
-</a>
+[![Star History Chart](https://api.star-history.com/svg?repos=JackChen-me/open-multi-agent&type=Date&v=20260402b)](https://star-history.com/#JackChen-me/open-multi-agent&Date)
 
 ## 许可证
 
