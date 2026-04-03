@@ -315,8 +315,68 @@ export interface OrchestratorConfig {
   readonly defaultProvider?: 'anthropic' | 'copilot' | 'openai'
   readonly defaultBaseURL?: string
   readonly defaultApiKey?: string
-  onProgress?: (event: OrchestratorEvent) => void
+  readonly onProgress?: (event: OrchestratorEvent) => void
+  readonly onTrace?: (event: TraceEvent) => void | Promise<void>
 }
+
+// ---------------------------------------------------------------------------
+// Trace events — lightweight observability spans
+// ---------------------------------------------------------------------------
+
+/** Trace event type discriminants. */
+export type TraceEventType = 'llm_call' | 'tool_call' | 'task' | 'agent'
+
+/** Shared fields present on every trace event. */
+export interface TraceEventBase {
+  /** Unique identifier for the entire run (runTeam / runTasks / runAgent call). */
+  readonly runId: string
+  readonly type: TraceEventType
+  /** Unix epoch ms when the span started. */
+  readonly startMs: number
+  /** Unix epoch ms when the span ended. */
+  readonly endMs: number
+  /** Wall-clock duration in milliseconds (`endMs - startMs`). */
+  readonly durationMs: number
+  /** Agent name associated with this span. */
+  readonly agent: string
+  /** Task ID associated with this span. */
+  readonly taskId?: string
+}
+
+/** Emitted for each LLM API call (one per agent turn). */
+export interface LLMCallTrace extends TraceEventBase {
+  readonly type: 'llm_call'
+  readonly model: string
+  readonly turn: number
+  readonly tokens: TokenUsage
+}
+
+/** Emitted for each tool execution. */
+export interface ToolCallTrace extends TraceEventBase {
+  readonly type: 'tool_call'
+  readonly tool: string
+  readonly isError: boolean
+}
+
+/** Emitted when a task completes (wraps the full retry sequence). */
+export interface TaskTrace extends TraceEventBase {
+  readonly type: 'task'
+  readonly taskId: string
+  readonly taskTitle: string
+  readonly success: boolean
+  readonly retries: number
+}
+
+/** Emitted when an agent run completes (wraps the full conversation loop). */
+export interface AgentTrace extends TraceEventBase {
+  readonly type: 'agent'
+  readonly turns: number
+  readonly tokens: TokenUsage
+  readonly toolCalls: number
+}
+
+/** Discriminated union of all trace event types. */
+export type TraceEvent = LLMCallTrace | ToolCallTrace | TaskTrace | AgentTrace
 
 // ---------------------------------------------------------------------------
 // Memory

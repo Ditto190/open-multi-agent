@@ -161,7 +161,18 @@ export type {
   OrchestratorConfig,
   OrchestratorEvent,
 
+  // Trace
+  TraceEventType,
+  TraceEventBase,
+  TraceEvent,
+  LLMCallTrace,
+  ToolCallTrace,
+  TaskTrace,
+  AgentTrace,
+
   // Memory
   MemoryEntry,
   MemoryStore,
 } from './types.js'
+
+export { generateRunId } from './utils/trace.js'
