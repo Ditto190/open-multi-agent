@@ -50,4 +50,36 @@ describe('pre-registered deterministic validation runner', () => {
     expect(results[0]?.truncated).toBe(true)
     expect(allValidationsPassed(results)).toBe(false)
   })
+
+  it('applies trusted per-command environment overrides and unsets after credential stripping', async () => {
+    const runner = new ScriptedCommandRunner(() => ({ stdout: 'ok', stderr: '', exitCode: 0 }))
+    const config = testConfig({
+      validationCommands: [{
+        id: 'ambient-test',
+        command: 'npm',
+        args: ['test'],
+        cwd: '.',
+        timeoutMs: 10_000,
+        env: { OMA_MODEL: 'ambient-model' },
+        unsetEnv: ['INHERITED_MODEL'],
+      }],
+    })
+    const results = await runRegisteredValidations({
+      repoRoot: '/tmp/repository',
+      config,
+      runner,
+      env: {
+        PATH: '/usr/bin',
+        INHERITED_MODEL: 'remove-me',
+        GITHUB_TOKEN: 'remove-me-too',
+      },
+    })
+    expect(runner.calls[0]?.options.env).toMatchObject({ PATH: '/usr/bin', OMA_MODEL: 'ambient-model' })
+    expect(runner.calls[0]?.options.env).not.toHaveProperty('INHERITED_MODEL')
+    expect(runner.calls[0]?.options.env).not.toHaveProperty('GITHUB_TOKEN')
+    expect(results[0]?.environment).toEqual({
+      set: [{ name: 'OMA_MODEL', value: 'ambient-model' }],
+      unset: ['INHERITED_MODEL'],
+    })
+  })
 })

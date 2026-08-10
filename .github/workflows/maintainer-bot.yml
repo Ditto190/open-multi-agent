@@ -1,0 +1,286 @@
+name: OMA Maintainer Bot
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: oma-maintainer-${{ github.repository }}-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  activate:
+    if: >-
+      github.repository == 'open-multi-agent/open-multi-agent' &&
+      github.event.label.name == 'agent-ready'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Publish immediate STARTED status and pin the default branch
+        id: started
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const marker = 'oma-maintainer-bot-status:v1'
+            const botId = 41898282
+            const repository = context.repo.owner + '/' + context.repo.repo
+            const issueNumber = context.issue.number
+            const runUrl = `${context.serverUrl}/${repository}/actions/runs/${context.runId}`
+            const claimId = `${context.runId}.${process.env.GITHUB_RUN_ATTEMPT}`
+            const repo = await github.rest.repos.get(context.repo)
+            const issue = await github.rest.issues.get({
+              ...context.repo,
+              issue_number: issueNumber,
+            })
+            const eventIssue = context.payload.issue
+            const labelNames = labels => [...new Set(labels.map(label => typeof label === 'string' ? label : label.name))].sort()
+            const eventSnapshotMatched = issue.data.number === eventIssue.number &&
+              issue.data.title === eventIssue.title &&
+              (issue.data.body ?? '') === (eventIssue.body ?? '') &&
+              issue.data.state === eventIssue.state &&
+              issue.data.updated_at === eventIssue.updated_at &&
+              issue.data.user?.login === eventIssue.user?.login &&
+              JSON.stringify(labelNames(issue.data.labels)) === JSON.stringify(labelNames(eventIssue.labels))
+            const branch = await github.rest.repos.getBranch({
+              ...context.repo,
+              branch: repo.data.default_branch,
+            })
+            const baseSha = branch.data.commit.sha
+            const metadata = {
+              version: 1,
+              repository,
+              issueNumber,
+              status: 'STARTED',
+              claimId,
+              actionsRunId: Number(context.runId),
+              runUrl,
+              baseSha,
+              issueRevision: null,
+              runKey: null,
+              branch: null,
+              pullRequestUrl: null,
+              updatedAt: new Date().toISOString(),
+              claims: [],
+            }
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            })
+            const trusted = comments.filter(comment =>
+              comment.user?.id === botId &&
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.user?.type === 'Bot' &&
+              comment.body?.includes(marker))
+            if (trusted.length > 1) throw new Error('Multiple trusted Maintainer Bot status comments exist.')
+            let commentId = trusted[0]?.id
+            if (commentId === undefined) {
+              const body = `<!-- ${marker} ${JSON.stringify(metadata)} -->\n## OMA Maintainer Bot — STARTED\n\n- Actions run: [${context.runId}](${runUrl})\n- Base SHA: \`${baseSha}\`\n- Issue revision: \`pending\`\n\nThe label event was received. Deterministic authorization, revision, scope, duplicate, and readiness checks are starting.\n\n_This bot creates Draft PRs only. It never approves, merges, closes, releases, publishes, tags, or deploys._\n`
+              const created = await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: issueNumber,
+                body,
+              })
+              commentId = created.data.id
+            } else {
+              const matches = [...trusted[0].body.matchAll(new RegExp(`<!--\\s*${marker}\\s+(\\{[^\\n]*\\})\\s*-->`, 'g'))]
+              if (matches.length !== 1) throw new Error('Trusted Maintainer Bot comment has invalid machine metadata.')
+              const previous = JSON.parse(matches[0][1])
+              if (previous.repository !== repository || previous.issueNumber !== issueNumber) {
+                throw new Error('Trusted Maintainer Bot comment belongs to a different issue.')
+              }
+              const body = `${matches[0][0]}\n## OMA Maintainer Bot — STARTED\n\n- Actions run: [${context.runId}](${runUrl})\n- Base SHA: \`${baseSha}\`\n- Issue revision: \`pending\`\n- Previous durable status: \`${previous.status}\`\n\nThe new label event was received. The prior machine claim remains authoritative until deterministic duplicate, stale, permission, revision, and readiness checks finish.\n\n_This bot creates Draft PRs only. It never approves, merges, closes, releases, publishes, tags, or deploys._\n`
+              await github.rest.issues.updateComment({
+                ...context.repo,
+                comment_id: commentId,
+                body,
+              })
+            }
+            core.setOutput('base_sha', baseSha)
+            core.setOutput('claim_id', claimId)
+            core.setOutput('comment_id', String(commentId))
+            core.setOutput('run_url', runUrl)
+            core.setOutput('event_snapshot_matched', String(eventSnapshotMatched))
+
+      - name: Check out the trusted default-branch commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ steps.started.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - name: Verify pinned npm version
+        run: test "$(npm --version)" = "10.9.8"
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build the deterministic host and OMA engine
+        id: build
+        run: npm run build -w @open-multi-agent/maintainer-host
+
+      - name: Re-fetch, authorize, and claim the candidate run
+        id: prepare
+        env:
+          MAINTAINER_BOT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OMA_CLAIM_ID: ${{ steps.started.outputs.claim_id }}
+          OMA_RUN_URL: ${{ steps.started.outputs.run_url }}
+          OMA_BASE_SHA: ${{ steps.started.outputs.base_sha }}
+          OMA_EVENT_SNAPSHOT_MATCHED: ${{ steps.started.outputs.event_snapshot_matched }}
+          OMA_PR_CREATION_ATTESTED: ${{ vars.OMA_MAINTAINER_BOT_PR_CREATION_ENABLED }}
+        run: >-
+          node packages/maintainer-host/dist/cli.js prepare
+          --event "$GITHUB_EVENT_PATH"
+          --policy packages/maintainer-host/config/production-policy.json
+          --repo "$GITHUB_WORKSPACE"
+          --event-id "${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+          --claim-id "$OMA_CLAIM_ID"
+          --actions-run-id "$GITHUB_RUN_ID"
+          --run-url "$OMA_RUN_URL"
+          --base-sha "$OMA_BASE_SHA"
+          --event-snapshot-matched "$OMA_EVENT_SNAPSHOT_MATCHED"
+          --pr-creation-attested "$OMA_PR_CREATION_ATTESTED"
+          --activation-out "$RUNNER_TEMP/oma-maintainer/activation.json"
+
+      - name: Run OMA and DeepSeek in a credential-isolated child process
+        id: engine
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: >-
+          node packages/maintainer-host/dist/cli.js run-engine
+          --activation "$RUNNER_TEMP/oma-maintainer/activation.json"
+          --result-out "$RUNNER_TEMP/oma-maintainer/engine-result.json"
+          --state-dir "$RUNNER_TEMP/oma-maintainer/state"
+          --artifact-dir "$RUNNER_TEMP/oma-maintainer/artifacts"
+          --maintainer-bot-cli packages/maintainer-bot/dist/cli.js
+          --repo "$GITHUB_WORKSPACE"
+
+      - name: Revalidate and create at most one Draft PR
+        id: finalize
+        if: always() && steps.build.outcome == 'success' && steps.prepare.outcome == 'success'
+        env:
+          MAINTAINER_BOT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OMA_PR_CREATION_ATTESTED: ${{ vars.OMA_MAINTAINER_BOT_PR_CREATION_ENABLED }}
+        run: >-
+          node packages/maintainer-host/dist/cli.js finalize
+          --activation "$RUNNER_TEMP/oma-maintainer/activation.json"
+          --engine-result "$RUNNER_TEMP/oma-maintainer/engine-result.json"
+          --event "$GITHUB_EVENT_PATH"
+          --policy packages/maintainer-host/config/production-policy.json
+          --state-dir "$RUNNER_TEMP/oma-maintainer/state"
+          --artifact-dir "$RUNNER_TEMP/oma-maintainer/artifacts"
+          --repo "$GITHUB_WORKSPACE"
+          --pr-creation-attested "$OMA_PR_CREATION_ATTESTED"
+          --final-out "$RUNNER_TEMP/oma-maintainer/final.json"
+
+      - name: Publish infrastructure failure fallback
+        if: always() && steps.finalize.outcome != 'success'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          OMA_BASE_SHA: ${{ steps.started.outputs.base_sha }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const marker = 'oma-maintainer-bot-status:v1'
+            const repository = context.repo.owner + '/' + context.repo.repo
+            const issueNumber = context.issue.number
+            const claimId = `${context.runId}.${process.env.GITHUB_RUN_ATTEMPT}`
+            const runUrl = `${context.serverUrl}/${repository}/actions/runs/${context.runId}`
+            const baseSha = process.env.OMA_BASE_SHA || context.sha
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            })
+            const trusted = comments.filter(comment =>
+              comment.user?.id === 41898282 &&
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.user?.type === 'Bot' &&
+              comment.body?.includes(marker))
+            if (trusted.length > 1) throw new Error('Multiple trusted Maintainer Bot status comments exist.')
+            const current = trusted[0]
+            let previous = null
+            if (current !== undefined) {
+              const matches = [...current.body.matchAll(new RegExp(`<!--\\s*${marker}\\s+(\\{[^\\n]*\\})\\s*-->`, 'g'))]
+              if (matches.length === 1) {
+                try { previous = JSON.parse(matches[0][1]) } catch { previous = null }
+              }
+            }
+            const sameClaim = previous?.claimId === claimId && previous?.runKey
+            const runningClaim = sameClaim && (previous.status === 'STARTED' || previous.status === 'RUNNING')
+            const terminalClaim = sameClaim && !runningClaim
+            const status = runningClaim ? 'NEEDS_HUMAN' : terminalClaim ? previous.status : 'FAILED'
+            const metadata = {
+              version: 1,
+              repository,
+              issueNumber,
+              status,
+              claimId,
+              actionsRunId: Number(context.runId),
+              runUrl,
+              baseSha: sameClaim ? previous.baseSha : baseSha,
+              issueRevision: sameClaim ? previous.issueRevision : null,
+              runKey: sameClaim ? previous.runKey : null,
+              branch: sameClaim ? previous.branch : null,
+              pullRequestUrl: sameClaim ? previous.pullRequestUrl : null,
+              updatedAt: new Date().toISOString(),
+            }
+            const claims = new Map()
+            const add = value => {
+              if (!value || !value.claimId) return
+              const claim = {
+                status: value.status,
+                claimId: value.claimId,
+                actionsRunId: value.actionsRunId,
+                runUrl: value.runUrl,
+                baseSha: value.baseSha,
+                issueRevision: value.issueRevision ?? null,
+                runKey: value.runKey ?? null,
+                branch: value.branch ?? null,
+                pullRequestUrl: value.pullRequestUrl ?? null,
+                updatedAt: value.updatedAt,
+              }
+              claims.set(claim.runKey ?? `pending:${claim.claimId}`, claim)
+            }
+            if (Array.isArray(previous?.claims)) previous.claims.forEach(add)
+            add(previous)
+            if (metadata.runKey) claims.delete(`pending:${metadata.claimId}`)
+            add(metadata)
+            metadata.claims = [...claims.values()]
+            if (metadata.claims.length > 64) throw new Error('Durable claim ledger reached safe capacity.')
+            const revision = metadata.issueRevision === null ? '`not resolved`' : `\`${metadata.issueRevision}\``
+            const detail = runningClaim
+              ? 'The control layer stopped after a durable RUNNING claim. Automatic model resume is forbidden; inspect this run and reauthorize a fresh revision or base.'
+              : terminalClaim
+                ? `The control layer had already published terminal state ${previous.status}; this fallback preserved that authoritative terminal result.`
+                : 'The control layer failed before it established a durable RUNNING claim. Inspect the linked run; no Draft PR was authorized by this fallback.'
+            const body = `<!-- ${marker} ${JSON.stringify(metadata)} -->\n## OMA Maintainer Bot — ${status}\n\n- Actions run: [${context.runId}](${runUrl})\n- Base SHA: \`${metadata.baseSha}\`\n- Issue revision: ${revision}\n\n${detail}\n\n_This bot creates Draft PRs only. It never approves, merges, closes, releases, publishes, tags, or deploys._\n`
+            if (current !== undefined) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: current.id, body })
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: issueNumber, body })
+            }
+            await core.summary
+              .addHeading(`OMA Maintainer Bot — ${status}`)
+              .addLink(`Actions run ${context.runId}`, runUrl)
+              .addRaw(`\n${detail}\n`)
+              .write()
+
+      - name: Mark validated FAILED terminal as an unsuccessful run
+        if: always() && steps.finalize.outcome == 'success' && steps.finalize.outputs.terminal_status == 'FAILED'
+        run: exit 1
