@@ -71,17 +71,22 @@ export const githubIssueSchema = z.object({
 
 export type GitHubIssue = z.infer<typeof githubIssueSchema>
 
+export const githubActorSchema = z.object({
+  id: z.number().int().positive(),
+  login: z.string().min(1),
+  type: z.string().min(1),
+})
+
+export type GitHubActor = z.infer<typeof githubActorSchema>
+
 export const githubCommentSchema = z.object({
   id: z.number().int().positive(),
+  node_id: z.string().min(1),
   body: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
   author_association: z.string().optional(),
-  user: z.object({
-    id: z.number().int().positive(),
-    login: z.string(),
-    type: z.string(),
-  }),
+  user: githubActorSchema,
 })
 
 export type GitHubComment = z.infer<typeof githubCommentSchema>
@@ -106,11 +111,7 @@ export const githubPullRequestSchema = z.object({
   draft: z.boolean().nullable(),
   title: z.string(),
   body: z.string().nullable(),
-  user: z.object({
-    id: z.number().int().positive(),
-    login: z.string(),
-    type: z.string(),
-  }),
+  user: githubActorSchema,
   head: z.object({ ref: z.string(), sha: sha40 }),
   base: z.object({ ref: z.string(), sha: sha40 }),
   merged_at: z.string().nullable(),
@@ -126,6 +127,41 @@ export const githubActionsRunSchema = z.object({
 })
 
 export type GitHubActionsRun = z.infer<typeof githubActionsRunSchema>
+
+const githubAppSlugSchema = z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/)
+const githubClientIdSchema = z.string().regex(/^[A-Za-z0-9._-]{8,100}$/)
+
+export const githubAppWriterContractSchema = z.object({
+  enabled: z.boolean(),
+  expectedAppId: z.number().int().positive(),
+  expectedClientId: githubClientIdSchema,
+  expectedSlug: githubAppSlugSchema,
+  expectedInstallationId: z.number().int().positive(),
+  expectedBotUserId: z.number().int().positive(),
+  actualSlug: githubAppSlugSchema,
+  actualInstallationId: z.number().int().positive(),
+})
+
+export type GitHubAppWriterContract = z.infer<typeof githubAppWriterContractSchema>
+
+export const githubAppWriterIdentitySchema = z.object({
+  appId: z.number().int().positive(),
+  clientId: githubClientIdSchema,
+  slug: githubAppSlugSchema,
+  installationId: z.number().int().positive(),
+  botUserId: z.number().int().positive(),
+  botLogin: z.string().min(1).max(120),
+}).superRefine((identity, context) => {
+  if (identity.botLogin !== `${identity.slug}[bot]`) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['botLogin'],
+      message: 'GitHub App bot login must match the verified App slug',
+    })
+  }
+})
+
+export type GitHubAppWriterIdentity = z.infer<typeof githubAppWriterIdentitySchema>
 
 const pathRuleSchema = z.object({
   path: repoPath,
@@ -229,7 +265,7 @@ export const statusClaimSchema = z.object({
 export type StatusClaim = z.infer<typeof statusClaimSchema>
 
 export const statusMetadataSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   repository: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
   issueNumber: z.number().int().positive(),
   status: activationStatusSchema,
@@ -264,7 +300,8 @@ export const activationContextSchema = z.object({
   runUrl: z.string().url(),
   commentId: z.number().int().positive(),
   branch: z.string().max(240).nullable(),
-  pullRequestCreationAttested: z.boolean(),
+  writerIdentity: githubAppWriterIdentitySchema,
+  removedBootstrapCommentCount: z.number().int().nonnegative().max(1),
   request: controlPlaneRequestSchema.nullable(),
   config: maintainerConfigSchema.nullable(),
   admission: admissionDecisionSchema.nullable(),

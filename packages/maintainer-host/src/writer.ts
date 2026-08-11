@@ -10,8 +10,8 @@ import {
 import type { GitHubClient } from './github.js'
 import { deterministicBranchName } from './policy.js'
 import { sanitizePublicLine } from './public-output.js'
-import type { GitHubPullRequest, ProductionPolicy } from './schema.js'
-import { isTrustedBotUser } from './status.js'
+import type { GitHubAppWriterIdentity, GitHubPullRequest, ProductionPolicy } from './schema.js'
+import { isExpectedAppBotUser } from './status.js'
 
 export const PR_MARKER = 'oma-maintainer-bot-pr:v1'
 
@@ -25,7 +25,8 @@ export async function writeDraftPullRequest(options: {
   readonly repoRoot: string
   readonly runner: CommandRunner
   readonly github: GitHubClient
-  readonly githubToken: string
+  readonly githubAppToken: string
+  readonly writerIdentity: GitHubAppWriterIdentity
   readonly policy: ProductionPolicy
   readonly request: ControlPlaneRequest
   readonly config: MaintainerConfig
@@ -57,6 +58,7 @@ export async function writeDraftPullRequest(options: {
       options.defaultBranch,
       proposal.baseSha,
       branch,
+      options.writerIdentity,
     )) {
       throw new Error('The deterministic head branch is already associated with conflicting pull request state.')
     }
@@ -66,7 +68,7 @@ export async function writeDraftPullRequest(options: {
     throw new Error('The deterministic remote branch already exists without a matching open Draft PR.')
   }
 
-  const nonSecretGitEnvironment = writerGitEnvironment(process.env)
+  const nonSecretGitEnvironment = writerGitEnvironment(process.env, options.writerIdentity)
   await assertSafeLocalGitConfiguration(options.runner, options.repoRoot, nonSecretGitEnvironment)
   const remote = (await options.runner.run('git', ['remote', 'get-url', 'origin'], { cwd: options.repoRoot })).stdout.trim()
   const expectedRemote = `https://github.com/${proposal.repository}`
@@ -119,7 +121,7 @@ export async function writeDraftPullRequest(options: {
   await options.runner.run(
     'git',
     ['push', expectedRemote, `HEAD:refs/heads/${branch}`],
-    { cwd: options.repoRoot, env: writerGitEnvironment(process.env, options.githubToken) },
+    { cwd: options.repoRoot, env: writerGitEnvironment(process.env, options.writerIdentity, options.githubAppToken) },
   )
   const pullRequest = await options.github.createDraftPullRequest({
     repository: proposal.repository,
@@ -140,6 +142,7 @@ export async function writeDraftPullRequest(options: {
       options.defaultBranch,
       proposal.baseSha,
       branch,
+      options.writerIdentity,
     )
     || pullRequest.head.sha !== headSha
   ) {
@@ -201,10 +204,11 @@ export function isMatchingBotDraftPullRequest(
   base: string,
   baseSha: string,
   head: string,
+  writerIdentity: GitHubAppWriterIdentity,
 ): boolean {
   return pull.state === 'open'
     && pull.draft === true
-    && isTrustedBotUser(pull.user)
+    && isExpectedAppBotUser(pull.user, writerIdentity)
     && pull.base.ref === base
     && pull.base.sha === baseSha
     && pull.head.ref === head
@@ -222,7 +226,11 @@ function commitMessage(request: ControlPlaneRequest): string {
   return `${type}: address issue #${request.issue.number}`
 }
 
-function writerGitEnvironment(source: NodeJS.ProcessEnv, token?: string): NodeJS.ProcessEnv {
+function writerGitEnvironment(
+  source: NodeJS.ProcessEnv,
+  writerIdentity: GitHubAppWriterIdentity,
+  token?: string,
+): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {}
   for (const name of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ']) {
     if (source[name] !== undefined) environment[name] = source[name]
@@ -245,10 +253,11 @@ function writerGitEnvironment(source: NodeJS.ProcessEnv, token?: string): NodeJS
   environment['GIT_CONFIG_GLOBAL'] = '/dev/null'
   environment['GIT_CONFIG_NOSYSTEM'] = '1'
   environment['GIT_TERMINAL_PROMPT'] = '0'
-  environment['GIT_AUTHOR_NAME'] = 'github-actions[bot]'
-  environment['GIT_AUTHOR_EMAIL'] = '41898282+github-actions[bot]@users.noreply.github.com'
-  environment['GIT_COMMITTER_NAME'] = 'github-actions[bot]'
-  environment['GIT_COMMITTER_EMAIL'] = '41898282+github-actions[bot]@users.noreply.github.com'
+  const email = `${writerIdentity.botUserId}+${writerIdentity.botLogin}@users.noreply.github.com`
+  environment['GIT_AUTHOR_NAME'] = writerIdentity.botLogin
+  environment['GIT_AUTHOR_EMAIL'] = email
+  environment['GIT_COMMITTER_NAME'] = writerIdentity.botLogin
+  environment['GIT_COMMITTER_EMAIL'] = email
   return environment
 }
 

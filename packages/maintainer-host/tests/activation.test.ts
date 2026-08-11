@@ -19,6 +19,8 @@ import { finalizeActivation, prepareActivation } from '../src/activation.js'
 import { productionPolicy } from './helpers.js'
 import {
   BASE_SHA,
+  APP_CONTRACT,
+  APP_BOT_LOGIN,
   FakeGitHub,
   ISSUE_NUMBER,
   RecordingRunner,
@@ -44,13 +46,13 @@ describe('mocked GitHub + scripted OMA activation path', () => {
       originalEvent: fixture.event,
       github: fixture.github,
       runner: fixture.runner,
-      githubToken: 'github-writer-token',
+      githubAppToken: 'github-app-installation-token',
+      writerContract: APP_CONTRACT,
       repoRoot: fixture.repoRoot,
       policy: fixture.policy,
       stateDir: fixture.stateDir,
       artifactDir: fixture.artifactDir,
       finalizedAt: '2026-08-10T18:00:00Z',
-      pullRequestCreationAttested: true,
     })
     expect(final.status, final.detail).toBe('DRAFT_PR_CREATED')
     expect(fixture.github.createdPullRequests).toBe(1)
@@ -69,6 +71,8 @@ describe('mocked GitHub + scripted OMA activation path', () => {
     const push = fixture.runner.calls[pushIndex]!
     expect(push.options.env).not.toHaveProperty('GITHUB_TOKEN')
     expect(push.options.env).not.toHaveProperty('DEEPSEEK_API_KEY')
+    expect(push.options.env).not.toHaveProperty('MAINTAINER_BOT_APP_TOKEN')
+    expect(push.options.env).toMatchObject({ GIT_AUTHOR_NAME: APP_BOT_LOGIN })
 
     fixture.github.timeline = [{
       event: 'cross-referenced',
@@ -95,7 +99,8 @@ describe('mocked GitHub + scripted OMA activation path', () => {
       runUrl: `https://github.com/${REPOSITORY}/actions/runs/101`,
       baseShaHint: BASE_SHA,
       eventSnapshotMatched: true,
-      pullRequestCreationAttested: false,
+      writerContract: APP_CONTRACT,
+      removedBootstrapCommentCount: 0,
     })
     expect(duplicate).toMatchObject({ shouldRun: false, status: 'DRAFT_PR_CREATED' })
     expect(fixture.github.createdPullRequests).toBe(1)
@@ -113,13 +118,13 @@ describe('mocked GitHub + scripted OMA activation path', () => {
       originalEvent: fixture.event,
       github: fixture.github,
       runner: fixture.runner,
-      githubToken: 'github-writer-token',
+      githubAppToken: 'github-app-installation-token',
+      writerContract: APP_CONTRACT,
       repoRoot: fixture.repoRoot,
       policy: fixture.policy,
       stateDir: fixture.stateDir,
       artifactDir: fixture.artifactDir,
       finalizedAt: '2026-08-10T18:00:00Z',
-      pullRequestCreationAttested: true,
     })
     expect(final.status).toBe('NEEDS_HUMAN')
     expect(final.detail).toMatch(/content drifted after review/)
@@ -127,10 +132,34 @@ describe('mocked GitHub + scripted OMA activation path', () => {
     expect(fixture.runner.calls.some(call => call.args[0] === 'push')).toBe(false)
   })
 
-  it('publishes NEEDS_HUMAN before model execution when the trusted PR-setting attestation is absent', async () => {
+  it('fails closed before the writer when the App token identity changes after prepare', async () => {
+    const fixture = await runToProposal()
+    fixture.github.viewerLogin = 'unexpected-app[bot]'
+    await expect(finalizeActivation({
+      activation: fixture.activation,
+      engineResult: {
+        schemaVersion: 1, attempted: true, exitCode: 0,
+        status: 'DRAFT_PR_PROPOSAL_READY', detail: 'Proposal ready.',
+      },
+      originalEvent: fixture.event,
+      github: fixture.github,
+      runner: fixture.runner,
+      githubAppToken: 'github-app-installation-token',
+      writerContract: APP_CONTRACT,
+      repoRoot: fixture.repoRoot,
+      policy: fixture.policy,
+      stateDir: fixture.stateDir,
+      artifactDir: fixture.artifactDir,
+      finalizedAt: '2026-08-10T18:00:00Z',
+    })).rejects.toThrow(/not the expected Maintainer Bot App installation identity/)
+    expect(fixture.github.createdPullRequests).toBe(0)
+    expect(fixture.runner.calls.some(call => call.args[0] === 'push')).toBe(false)
+  })
+
+  it('fails before model execution when the dedicated App writer is not enabled', async () => {
     const repoRoot = await fixtureRepo()
     const github = new FakeGitHub()
-    const context = await prepareActivation({
+    await expect(prepareActivation({
       event: labelEvent(),
       github,
       runner: repositoryRunner(repoRoot),
@@ -143,10 +172,10 @@ describe('mocked GitHub + scripted OMA activation path', () => {
       runUrl: `https://github.com/${REPOSITORY}/actions/runs/100`,
       baseShaHint: BASE_SHA,
       eventSnapshotMatched: true,
-      pullRequestCreationAttested: false,
-    })
-    expect(context).toMatchObject({ shouldRun: false, status: 'NEEDS_HUMAN' })
-    expect(context.detail).toMatch(/attestation.*absent/i)
+      writerContract: { ...APP_CONTRACT, enabled: false },
+      removedBootstrapCommentCount: 0,
+    })).rejects.toThrow(/not explicitly enabled/)
+    expect(github.createdPullRequests).toBe(0)
   })
 
   it('stops before model execution when the checked-out base is stale', async () => {
@@ -165,7 +194,8 @@ describe('mocked GitHub + scripted OMA activation path', () => {
       runUrl: `https://github.com/${REPOSITORY}/actions/runs/102`,
       baseShaHint: 'b'.repeat(40),
       eventSnapshotMatched: true,
-      pullRequestCreationAttested: true,
+      writerContract: APP_CONTRACT,
+      removedBootstrapCommentCount: 0,
     })
     expect(context).toMatchObject({ shouldRun: false, status: 'NEEDS_HUMAN' })
     expect(context.detail).toMatch(/checked-out base SHA differs/)
@@ -188,7 +218,8 @@ describe('mocked GitHub + scripted OMA activation path', () => {
       runUrl: `https://github.com/${REPOSITORY}/actions/runs/103`,
       baseShaHint: BASE_SHA,
       eventSnapshotMatched: false,
-      pullRequestCreationAttested: true,
+      writerContract: APP_CONTRACT,
+      removedBootstrapCommentCount: 0,
     })
     expect(context).toMatchObject({ shouldRun: false, status: 'NEEDS_HUMAN' })
     expect(context.detail).toMatch(/changed between the labeled event and the first trusted GitHub snapshot/)
@@ -206,13 +237,13 @@ describe('mocked GitHub + scripted OMA activation path', () => {
       originalEvent: fixture.event,
       github: fixture.github,
       runner: fixture.runner,
-      githubToken: 'github-writer-token',
+      githubAppToken: 'github-app-installation-token',
+      writerContract: APP_CONTRACT,
       repoRoot: fixture.repoRoot,
       policy: fixture.policy,
       stateDir: fixture.stateDir,
       artifactDir: fixture.artifactDir,
       finalizedAt: '2026-08-10T18:03:00Z',
-      pullRequestCreationAttested: true,
     })
     expect(result.status).toBe('FAILED')
     expect(fixture.github.createdPullRequests).toBe(0)
@@ -232,13 +263,13 @@ describe('mocked GitHub + scripted OMA activation path', () => {
       originalEvent: fixture.event,
       github: fixture.github,
       runner: fixture.runner,
-      githubToken: 'github-writer-token',
+      githubAppToken: 'github-app-installation-token',
+      writerContract: APP_CONTRACT,
       repoRoot: fixture.repoRoot,
       policy: fixture.policy,
       stateDir: fixture.stateDir,
       artifactDir: fixture.artifactDir,
       finalizedAt: '2026-08-10T18:04:00Z',
-      pullRequestCreationAttested: true,
     })
     expect(result).toMatchObject({ shouldRun: false, status: 'NEEDS_HUMAN' })
     expect(fixture.github.createdPullRequests).toBe(0)
@@ -262,13 +293,13 @@ describe('mocked GitHub + scripted OMA activation path', () => {
       originalEvent: fixture.event,
       github: fixture.github,
       runner: fixture.runner,
-      githubToken: 'github-writer-token',
+      githubAppToken: 'github-app-installation-token',
+      writerContract: APP_CONTRACT,
       repoRoot: fixture.repoRoot,
       policy: fixture.policy,
       stateDir: fixture.stateDir,
       artifactDir: fixture.artifactDir,
       finalizedAt: '2026-08-10T18:05:00Z',
-      pullRequestCreationAttested: true,
     })
     expect(result).toMatchObject({ shouldRun: false, status: 'NEEDS_HUMAN' })
     expect(result.detail).toMatch(/Unsafe local Git configuration/)
@@ -297,7 +328,8 @@ async function runToProposal(localGitConfigKeys?: readonly string[]) {
     runUrl: `https://github.com/${REPOSITORY}/actions/runs/100`,
     baseShaHint: BASE_SHA,
     eventSnapshotMatched: true,
-    pullRequestCreationAttested: true,
+    writerContract: APP_CONTRACT,
+    removedBootstrapCommentCount: 0,
   })
   if (!activation.shouldRun || activation.request === null || activation.config === null) {
     throw new Error(`expected runnable activation: ${activation.detail}`)

@@ -9,7 +9,10 @@ import type {
 import type { GitHubClient } from '../src/github.js'
 import { loadProductionPolicy } from '../src/policy.js'
 import type {
+  GitHubActor,
   GitHubActionsRun,
+  GitHubAppWriterContract,
+  GitHubAppWriterIdentity,
   GitHubComment,
   GitHubIssue,
   GitHubLabelEvent,
@@ -21,6 +24,32 @@ export const BASE_SHA = 'a'.repeat(40)
 export const SECOND_SHA = 'b'.repeat(40)
 export const ISSUE_NUMBER = 488
 export const REPOSITORY = 'open-multi-agent/open-multi-agent'
+export const APP_ID = 246_810
+export const APP_CLIENT_ID = 'Iv1.omaMaintainerBot'
+export const APP_SLUG = 'oma-maintainer-bot'
+export const APP_INSTALLATION_ID = 135_791
+export const APP_BOT_USER_ID = 975_310
+export const APP_BOT_LOGIN = `${APP_SLUG}[bot]`
+
+export const APP_IDENTITY: GitHubAppWriterIdentity = {
+  appId: APP_ID,
+  clientId: APP_CLIENT_ID,
+  slug: APP_SLUG,
+  installationId: APP_INSTALLATION_ID,
+  botUserId: APP_BOT_USER_ID,
+  botLogin: APP_BOT_LOGIN,
+}
+
+export const APP_CONTRACT: GitHubAppWriterContract = {
+  enabled: true,
+  expectedAppId: APP_ID,
+  expectedClientId: APP_CLIENT_ID,
+  expectedSlug: APP_SLUG,
+  expectedInstallationId: APP_INSTALLATION_ID,
+  expectedBotUserId: APP_BOT_USER_ID,
+  actualSlug: APP_SLUG,
+  actualInstallationId: APP_INSTALLATION_ID,
+}
 
 export const ISSUE_BODY = `## Describe the bug
 
@@ -87,6 +116,16 @@ export async function productionPolicy() {
 }
 
 export class FakeGitHub implements GitHubClient {
+  viewerLogin = APP_BOT_LOGIN
+  app = { id: APP_ID, clientId: APP_CLIENT_ID, slug: APP_SLUG }
+  botUser: GitHubActor = { id: APP_BOT_USER_ID, login: APP_BOT_LOGIN, type: 'Bot' }
+  installationRepositories = [REPOSITORY]
+  commentAuthorshipOverrides = new Map<string, {
+    authorLogin: string | null
+    editorLogin: string | null
+    viewerDidAuthor: boolean
+    createdViaEmail: boolean
+  }>()
   issue: GitHubIssue = issueFromEvent()
   comments: GitHubComment[] = []
   timeline: GitHubTimelineEvent[] = []
@@ -97,6 +136,35 @@ export class FakeGitHub implements GitHubClient {
   createdPullRequests = 0
   createdComments = 0
   updatedComments = 0
+
+  async getAuthenticatedViewerLogin() {
+    return this.viewerLogin
+  }
+
+  async getApp() {
+    return structuredClone(this.app)
+  }
+
+  async getUser(): Promise<GitHubActor> {
+    return structuredClone(this.botUser)
+  }
+
+  async listInstallationRepositories(): Promise<string[]> {
+    return [...this.installationRepositories]
+  }
+
+  async getIssueCommentAuthorship(nodeId: string) {
+    const override = this.commentAuthorshipOverrides.get(nodeId)
+    if (override !== undefined) return structuredClone(override)
+    const comment = this.comments.find(candidate => candidate.node_id === nodeId)
+    if (comment === undefined) throw new Error('comment not found')
+    return {
+      authorLogin: comment.user.login,
+      editorLogin: comment.updated_at === comment.created_at ? null : comment.user.login,
+      viewerDidAuthor: comment.user.login === this.viewerLogin,
+      createdViaEmail: false,
+    }
+  }
 
   async getRepository() {
     return { defaultBranch: 'main', fullName: REPOSITORY }
@@ -163,7 +231,7 @@ export class FakeGitHub implements GitHubClient {
       draft: true,
       title: input.title,
       body: input.body,
-      user: { id: 41_898_282, login: 'github-actions[bot]', type: 'Bot' },
+      user: structuredClone(this.botUser),
       head: { ref: input.head, sha: SECOND_SHA },
       base: { ref: input.base, sha: BASE_SHA },
       merged_at: null,
@@ -199,10 +267,18 @@ export function cleanRunner(head = BASE_SHA): RecordingRunner {
 export function botComment(id: number, body: string): GitHubComment {
   return {
     id,
+    node_id: `IC_${id}`,
     body,
     created_at: '2026-08-10T17:43:00Z',
     updated_at: '2026-08-10T17:43:00Z',
     author_association: 'NONE',
+    user: { id: APP_BOT_USER_ID, login: APP_BOT_LOGIN, type: 'Bot' },
+  }
+}
+
+export function githubActionsComment(id: number, body: string): GitHubComment {
+  return {
+    ...botComment(id, body),
     user: { id: 41_898_282, login: 'github-actions[bot]', type: 'Bot' },
   }
 }

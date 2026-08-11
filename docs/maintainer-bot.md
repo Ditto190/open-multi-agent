@@ -26,16 +26,25 @@ a long-running server.
 
 ## GitHub Actions activation flow
 
-1. The default-branch workflow publishes or updates one BOT status comment with
-   `STARTED`, Actions run URL/ID, and a freshly resolved base SHA. If an older
-   claim exists, the visible STARTED notice does not replace that machine claim
-   before duplicate/stale checks finish.
+1. A pinned `actions/create-github-app-token` commit requests a short-lived
+   installation token for the current repository only. Before checkout or
+   model work, deterministic preflight verifies operator enablement, token
+   viewer, App ID/client ID/slug, installation ID, bot user ID, and exact
+   single-repository scope. The verified App then publishes or updates one BOT
+   status comment with `STARTED`, Actions run URL/ID, and a freshly resolved
+   base SHA. If App preflight cannot run, the limited repository token may
+   publish one explicitly non-authoritative bootstrap failure notice; it can
+   never create a durable claim, branch, push, or PR. If an earlier App-owned
+   durable comment exists, the bootstrap notice is a temporary second comment
+   so configuration failure is never silent; the next verified App run removes
+   it before updating the authoritative App comment.
 2. GitHub serializes runs by repository and Issue number. The job uses a
    GitHub-hosted ephemeral runner, a 45-minute timeout, pinned Node/npm
-   versions, and explicit `actions: read`, `contents: write`, `issues: write`,
-   and `pull-requests: write` permissions.
+   versions, and workflow-level `contents: read` plus `issues: write`. The
+   dedicated App token separately requests `actions: read`, `contents: write`,
+   `issues: write`, `metadata: read`, and `pull-requests: write`.
 3. The host refetches repository, Issue, labels, material comments, timeline,
-   actor permission, current default-branch SHA, trusted setting attestation,
+   actor permission, current default-branch SHA, verified App identity,
    existing BOT state, branch, and PR metadata. It performs admission before a
    model call or repository edit.
 4. A separate child receives `DEEPSEEK_API_KEY` plus a small non-secret
@@ -49,15 +58,22 @@ a long-running server.
    proxy, credential, include, filter, or URL-rewrite configuration. Writer Git
    processes disable hooks plus global/system credential configuration, use a
    deterministic branch and canonical HTTPS destination, and create at most one
-   Draft PR. Every terminal path updates the single status comment and Actions
-   summary.
+   Draft PR. Every App-authenticated terminal path updates the authoritative
+   status comment and Actions summary; only an App-preflight failure uses the
+   temporary non-authoritative bootstrap notice described above.
 
 GitHub only triggers an `issues` workflow when its workflow file exists on the
-default branch. Repository Actions settings must also enable “Allow GitHub
-Actions to create and approve pull requests”; activation v1 uses only the
-creation half and never approves. See GitHub's
-[trigger documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)
-and [repository Actions settings](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository?apiVersion=2022-11-28).
+default branch. Activation v1 deliberately leaves organization and repository
+default workflow permissions at read-only and leaves “Allow GitHub Actions to
+create and approve pull requests” disabled. The Draft PR is created by the
+dedicated GitHub App, not `GITHUB_TOKEN`. GitHub documents that events emitted
+by `GITHUB_TOKEN` normally do not create a new workflow run, while events from
+a GitHub App installation token can trigger workflows; therefore an App-created
+Draft PR starts the repository's ordinary `pull_request` CI without enabling
+the broad Actions PR setting. See GitHub's
+[workflow trigger documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow),
+[`GITHUB_TOKEN` security reference](https://docs.github.com/en/actions/concepts/security/github_token),
+and [GitHub App installation authentication](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation).
 
 ## Fixed execution flow
 
@@ -142,10 +158,12 @@ safe-output gate still require the exact policy and prompt versions.
 
 `FileRunStateStore` is authoritative only inside one live engine/writer handoff.
 Because GitHub-hosted runners are ephemeral, `$RUNNER_TEMP` is never the
-cross-run authority. Activation v1 instead uses one identity-checked
-`github-actions[bot]` status comment containing a bounded machine-readable
-claim ledger, Actions run status, and deterministic branch/PR metadata. A user
-comment containing the same marker is ignored. The ledger retains prior
+cross-run authority. Activation v1 instead uses one status comment owned by
+the precisely verified dedicated App bot, containing a bounded
+machine-readable claim ledger, Actions run status, and deterministic branch/PR
+metadata. REST actor ID/login/type plus GraphQL author/editor/viewer provenance
+must all match the verified App; ordinary users and `github-actions[bot]`
+markers are ignored as durable authority. The ledger retains prior
 runKeys when a later revision becomes visible and fails closed at 64 claims
 instead of silently dropping idempotency history.
 
@@ -201,7 +219,9 @@ delegation, and search tools. OMA `bash` is not treated as a sandbox.
 
 The model process refuses to start when known GitHub/npm write credentials,
 including credential names with host-specific prefixes, are present. Launch
-the custom engine with `DEEPSEEK_API_KEY` only. Validation
+the custom engine with `DEEPSEEK_API_KEY` only. In particular,
+`MAINTAINER_BOT_APP_TOKEN` and the App private key never enter model or
+validation environments. Validation
 subprocesses receive an environment with token/key/secret/password/cookie and
 credential-like variables removed. Secret values are never written to model
 context, artifacts, or command output intentionally; output redaction remains
@@ -294,60 +314,81 @@ fork gh-aw and has not been run end-to-end against a live gh-aw version.
 
 ## Status and operations
 
-The Issue's single BOT comment and Actions job summary use these public states:
+The Issue's authoritative App-owned BOT comment and Actions job summary use
+these public states. The temporary repository-token bootstrap comment can only
+report pre-model `NEEDS_HUMAN`; it is not part of the durable state machine.
 
 - `STARTED`: the label delivery is visible and deterministic checks are starting.
-- `RUNNING`: fixed revision/base, permission, DoR, scope, duplicate, and setting-attestation checks passed; the isolated engine is running.
+- `RUNNING`: fixed revision/base, permission, DoR, scope, duplicate, and App identity/installation checks passed; the isolated engine is running.
 - `NEEDS_CLARIFICATION`: the strict Issue template or Definition of Ready is incomplete or conflicting.
 - `MANUAL_ONLY`: policy classifies the work as architecture, security, permissions, privacy, license, CI/release, broad API/refactor, uncontrolled dependency, or otherwise human-only.
-- `NEEDS_HUMAN`: stale/crashed state, drift, setting, conflicting branch/PR, or safety gate requires intervention.
+- `NEEDS_HUMAN`: stale/crashed state, drift, App configuration/identity, conflicting branch/PR, or safety gate requires intervention.
 - `FAILED`: infrastructure or engine failure produced no eligible Draft PR.
 - `DRAFT_PR_CREATED`: exactly one open Draft PR exists; human review remains required.
 
-To configure activation without exposing a value:
+To configure activation without exposing credential values:
 
-1. Add or rotate an Actions repository secret named `DEEPSEEK_API_KEY` under
-   **Settings → Secrets and variables → Actions**. Never put the value in an
-   Issue, workflow, repository file, log, artifact, or comment.
-2. Under **Settings → Actions → General → Workflow permissions**, enable the
-   repository option allowing GitHub Actions to create pull requests. Do not
-   enable or change it as a side effect of a code deployment.
-3. After an administrator verifies that setting, add a repository Actions
-   variable named `OMA_MAINTAINER_BOT_PR_CREATION_ENABLED` with the exact value
-   `true`. The host checks this trusted non-secret attestation before model
-   execution and again before writing; a missing, empty, or different value
-   fails closed. Remove or change the variable before disabling the setting.
-4. Keep the workflow's explicit permissions and branch protections under human
-   review. The default workflow permission may remain read-only because this
-   workflow declares its required scopes explicitly.
+1. Create a dedicated Maintainer Bot GitHub App. Install it on
+   `open-multi-agent/open-multi-agent` only. Grant repository permissions
+   **Actions: read**, **Contents: read and write**, **Issues: read and write**,
+   **Metadata: read**, and **Pull requests: read and write**. No organization
+   permission, webhook, event subscription, workflow-write permission, review,
+   administration, or members permission is required by v1. Do not silently
+   reuse the Release Bot App: its identity and permission contract are separate.
+2. Store one App private key as the repository Actions secret
+   `OMA_MAINTAINER_BOT_APP_PRIVATE_KEY`. Configure these repository Actions
+   variables from the installed App's public metadata:
+   `OMA_MAINTAINER_BOT_APP_ID`, `OMA_MAINTAINER_BOT_APP_CLIENT_ID`,
+   `OMA_MAINTAINER_BOT_APP_SLUG`,
+   `OMA_MAINTAINER_BOT_APP_INSTALLATION_ID`, and
+   `OMA_MAINTAINER_BOT_APP_BOT_USER_ID`. The host verifies every value against
+   the minted token and GitHub before a model call and again before a write.
+3. Add or rotate the repository Actions secret `DEEPSEEK_API_KEY`. Never put
+   either secret value in an Issue, variable, workflow file, log, artifact,
+   proposal, status comment, or PR body.
+4. Only after the App installation, permissions, variables, and both secrets
+   are reviewed, set `OMA_MAINTAINER_BOT_APP_WRITER_ENABLED` to exact `true`.
+   Missing configuration, private-key/token mint failure, an uninstalled or
+   under-permissioned App, identity drift, or broader repository scope stops
+   before model execution and publishes a public-safe `NEEDS_HUMAN` bootstrap
+   result where the limited repository token can do so.
+5. Keep **Settings → Actions → General → Workflow permissions** at read and
+   keep “Allow GitHub Actions to create and approve pull requests” disabled at
+   both organization and repository levels. Do not configure a PAT fallback.
 
-The REST endpoint that reads this repository setting requires repository
-`Administration: read`, which workflow `GITHUB_TOKEN` cannot request. v1
-therefore does not introduce an administration-capable token merely to inspect
-the setting. The operator attestation is the minimum safe pre-model gate; the
-actual Draft PR API remains the final capability check. See GitHub's
-[Actions permissions API](https://docs.github.com/en/rest/actions/permissions?apiVersion=2022-11-28).
+The former `OMA_MAINTAINER_BOT_PR_CREATION_ENABLED` variable described a
+`GITHUB_TOKEN` repository-setting attestation. It is obsolete and ignored in
+App-writer mode; do not set it to `true` to simulate App readiness. An operator
+may remove the stale variable separately after reviewing this migration.
+
+The pinned token action requests only the listed repository permissions and,
+because neither `owner` nor `repositories` is supplied, scopes the token to the
+current repository. The host additionally rejects a token that reports access
+to any other repository. Installation tokens expire after one hour; the job is
+bounded to 45 minutes and the action revokes its token during job cleanup. See
+the reviewed [token action contract](https://github.com/actions/create-github-app-token)
+and GitHub's [installation token API](https://docs.github.com/en/rest/apps/installations).
 
 At the implementation audit on 2026-08-11, the repository API reported
-`default_workflow_permissions: read` and PR creation disabled. No setting or
-secret was changed by implementation work. The explicit workflow permissions
-are compatible with the read default, but disabled PR creation is a deliberate
-activation blocker until a separately authorized operator step. Secret presence
-and the attestation variable were not inspected or configured.
+`default_workflow_permissions: read` and
+`can_approve_pull_request_reviews: false` at both organization and repository
+scope. Those settings are the intended App-writer configuration and were not
+changed. App credentials, App variables, installation, and permissions were
+not created or modified by implementation work.
 
 To disable the bot, disable the workflow in GitHub Actions for an immediate
-operational stop, or merge a trusted policy change setting `enabled` to
-`false`. The latter may still allow the trigger to publish a disabled terminal
-status, but never runs the model or writer. For key rotation, replace the
-Actions secret, verify no run is active, and revoke the old provider key; runs
-never persist the key in state or artifacts.
+operational stop, set `OMA_MAINTAINER_BOT_APP_WRITER_ENABLED` to `false`, or
+merge a trusted policy change setting `enabled` to `false`. A disabled/missing
+App contract never runs the model or writer. For DeepSeek key rotation, verify
+no run is active, replace `DEEPSEEK_API_KEY`, and revoke the old provider key.
+For App key rotation, add a new private key to the same App, replace
+`OMA_MAINTAINER_BOT_APP_PRIVATE_KEY`, verify a separately authorized run, then
+delete the old App key. Do not log or download keys into the repository. Runs
+never persist either key in state or artifacts.
 
-`GITHUB_TOKEN`-authenticated writes do not recursively trigger most new
-workflow runs. Therefore a Draft PR created by v1 should not be assumed to have
-automatically started the repository's ordinary `pull_request` CI; the trusted
-pre-PR validation registry is mandatory, and maintainers must inspect the PR's
-actual checks. This recursion behavior is documented in GitHub's
-[`GITHUB_TOKEN` security reference](https://docs.github.com/en/actions/concepts/security/github_token).
+The trusted pre-PR validation registry remains mandatory even though the
+App-created Draft PR triggers ordinary `pull_request` CI. Operators must inspect
+the actual PR checks; the bot never approves or merges based on CI alone.
 
 ## Verification and first live canary
 
@@ -362,8 +403,10 @@ A first live canary is a separate, explicitly authorized operation:
 
 1. Confirm Issue #488 is open and `agent-ready` is absent; inspect its material
    revision rather than reusing an old authorization.
-2. Configure/verify the DeepSeek secret, repository PR-creation setting, and
-   exact attestation variable.
+2. Configure/verify the DeepSeek secret, dedicated App installation and minimum
+   permissions, App private-key secret, exact identity variables, and writer
+   enablement variable. Confirm default workflow permissions remain read-only
+   and the Actions create/approve setting remains disabled.
 3. Verify the workflow exists on `main`, its action/runtime pins and production
    policy are reviewed, and no conflicting BOT branch/PR/run exists.
 4. Reapply `agent-ready` once with a write/maintain/admin actor and observe

@@ -1,15 +1,15 @@
 import {
   statusMetadataSchema,
   type GitHubComment,
+  type GitHubAppWriterIdentity,
   type StatusClaim,
   type StatusMetadata,
 } from './schema.js'
 import type { GitHubClient } from './github.js'
 import { sanitizePublicLine } from './public-output.js'
 
-export const STATUS_MARKER = 'oma-maintainer-bot-status:v1'
-export const GITHUB_ACTIONS_BOT_ID = 41_898_282
-export const GITHUB_ACTIONS_BOT_LOGIN = 'github-actions[bot]'
+export const STATUS_MARKER = 'oma-maintainer-bot-status:v2'
+export const BOOTSTRAP_STATUS_MARKER = 'oma-maintainer-bot-bootstrap-status:v1'
 
 export type ClaimDecision =
   | { readonly kind: 'claimed' }
@@ -46,27 +46,36 @@ export function parseStatusComment(body: string): StatusMetadata | null {
   }
 }
 
-export function isTrustedStatusComment(comment: GitHubComment): boolean {
-  return isTrustedBotUser(comment.user)
+export function isTrustedStatusComment(
+  comment: GitHubComment,
+  identity: GitHubAppWriterIdentity,
+): boolean {
+  return isExpectedAppBotUser(comment.user, identity)
 }
 
-export function isTrustedBotUser(user: { readonly id: number; readonly login: string; readonly type: string }): boolean {
-  return user.id === GITHUB_ACTIONS_BOT_ID
-    && user.login === GITHUB_ACTIONS_BOT_LOGIN
+export function isExpectedAppBotUser(
+  user: { readonly id: number; readonly login: string; readonly type: string },
+  identity: GitHubAppWriterIdentity,
+): boolean {
+  return user.id === identity.botUserId
+    && user.login === identity.botLogin
     && user.type === 'Bot'
 }
 
-export function findTrustedStatusComment(
-  comments: readonly GitHubComment[],
-  repository: string,
-  issueNumber: number,
-): { comment: GitHubComment; metadata: StatusMetadata } | null {
+export async function findTrustedStatusComment(input: {
+  readonly github: GitHubClient
+  readonly comments: readonly GitHubComment[]
+  readonly identity: GitHubAppWriterIdentity
+  readonly repository: string
+  readonly issueNumber: number
+}): Promise<{ comment: GitHubComment; metadata: StatusMetadata } | null> {
   const found: Array<{ comment: GitHubComment; metadata: StatusMetadata }> = []
-  for (const comment of comments) {
-    if (!isTrustedStatusComment(comment) || comment.body === null || !comment.body.includes(STATUS_MARKER)) continue
+  for (const comment of input.comments) {
+    if (!isTrustedStatusComment(comment, input.identity) || comment.body === null || !comment.body.includes(STATUS_MARKER)) continue
+    await assertTrustedStatusCommentAuthorship(input.github, comment, input.identity)
     const metadata = parseStatusComment(comment.body)
     if (metadata === null) continue
-    if (metadata.repository !== repository || metadata.issueNumber !== issueNumber) {
+    if (metadata.repository !== input.repository || metadata.issueNumber !== input.issueNumber) {
       throw new Error('Trusted Maintainer Bot status comment belongs to a different repository or Issue.')
     }
     found.push({ comment, metadata })
@@ -109,18 +118,47 @@ export function decideClaim(input: {
 
 export async function upsertStatusComment(input: {
   readonly github: GitHubClient
+  readonly identity: GitHubAppWriterIdentity
   readonly repository: string
   readonly issueNumber: number
   readonly comments: readonly GitHubComment[]
   readonly metadata: StatusMetadata
   readonly detail: string
 }): Promise<GitHubComment> {
-  const existing = findTrustedStatusComment(input.comments, input.repository, input.issueNumber)
+  const existing = await findTrustedStatusComment({
+    github: input.github,
+    comments: input.comments,
+    identity: input.identity,
+    repository: input.repository,
+    issueNumber: input.issueNumber,
+  })
   const metadata = mergeStatusMetadata(existing?.metadata ?? null, input.metadata)
   const body = renderStatusComment(metadata, input.detail)
-  return existing === null
+  const result = existing === null
     ? input.github.createIssueComment(input.repository, input.issueNumber, body)
     : input.github.updateIssueComment(input.repository, existing.comment.id, body)
+  const comment = await result
+  await assertTrustedStatusCommentAuthorship(input.github, comment, input.identity)
+  return comment
+}
+
+async function assertTrustedStatusCommentAuthorship(
+  github: GitHubClient,
+  comment: GitHubComment,
+  identity: GitHubAppWriterIdentity,
+): Promise<void> {
+  if (!isExpectedAppBotUser(comment.user, identity)) {
+    throw new Error('GitHub did not attribute the status comment to the expected Maintainer Bot App user.')
+  }
+  const authorship = await github.getIssueCommentAuthorship(comment.node_id)
+  if (
+    authorship.authorLogin !== identity.botLogin
+    || authorship.viewerDidAuthor !== true
+    || authorship.createdViaEmail
+    || authorship.editorLogin !== null && authorship.editorLogin !== identity.botLogin
+  ) {
+    throw new Error('Maintainer Bot status comment authorship or editor provenance is not the expected GitHub App.')
+  }
 }
 
 export function mergeStatusMetadata(

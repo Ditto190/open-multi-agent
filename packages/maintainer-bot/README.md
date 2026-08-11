@@ -8,7 +8,10 @@ contains no GitHub writer.
 The runnable GitHub Actions control layer and deterministic writer live in the
 separate private [`@open-multi-agent/maintainer-host`](../maintainer-host/README.md)
 workspace. Keeping that boundary separate ensures the model process never
-receives GitHub/npm/Actions write credentials.
+receives GitHub/npm/Actions write credentials. Production Draft PR writes use
+a separately verified, repository-scoped GitHub App installation token; the
+engine neither receives that token nor decides App identity, permissions, or
+write authorization.
 
 The behavior, operations, and threat boundary are documented in
 [`docs/maintainer-bot.md`](../../docs/maintainer-bot.md).

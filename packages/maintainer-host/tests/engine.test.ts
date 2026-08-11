@@ -16,6 +16,8 @@ describe('credential-isolated model process environment', () => {
       NPM_TOKEN: 'npm-write',
       NODE_AUTH_TOKEN: 'npm-write',
       CODEX_GITHUB_PERSONAL_ACCESS_TOKEN: 'host-specific-write',
+      MAINTAINER_BOT_APP_TOKEN: 'github-app-installation-write',
+      OMA_MAINTAINER_BOT_APP_PRIVATE_KEY: 'github-app-private-key',
       SAFE_BUT_UNNEEDED: 'omit-me',
     }, 'deepseek-only')
     expect(isolated).toMatchObject({
@@ -25,6 +27,7 @@ describe('credential-isolated model process environment', () => {
     for (const name of [
       'GITHUB_TOKEN', 'GH_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN',
       'NPM_TOKEN', 'NODE_AUTH_TOKEN', 'CODEX_GITHUB_PERSONAL_ACCESS_TOKEN', 'SAFE_BUT_UNNEEDED',
+      'MAINTAINER_BOT_APP_TOKEN', 'OMA_MAINTAINER_BOT_APP_PRIVATE_KEY',
     ]) expect(isolated).not.toHaveProperty(name)
     expect(() => assertNoHostCredentials(isolated)).not.toThrow()
   })

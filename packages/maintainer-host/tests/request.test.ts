@@ -2,15 +2,17 @@ import { describe, expect, it } from 'vitest'
 import { evaluateAdmission } from '@open-multi-agent/maintainer-bot'
 import { buildControlPlaneRequest, ControlPlaneBuildError } from '../src/request.js'
 import { renderStatusComment } from '../src/status.js'
-import { botComment, FakeGitHub, ISSUE_BODY, labelEvent, productionPolicy, REPOSITORY } from './helpers.js'
+import { APP_IDENTITY, botComment, FakeGitHub, ISSUE_BODY, labelEvent, productionPolicy, REPOSITORY } from './helpers.js'
 
-async function build(github: FakeGitHub, event = labelEvent()) {
+async function build(github: FakeGitHub, event = labelEvent(), removedBootstrapCommentCount = 0) {
   return buildControlPlaneRequest({
     event,
     github,
     policy: await productionPolicy(),
     eventId: 'run-1.1',
     receivedAt: '2026-08-10T17:43:00Z',
+    writerIdentity: APP_IDENTITY,
+    removedBootstrapCommentCount,
   })
 }
 
@@ -22,6 +24,16 @@ describe('GitHub event to deterministic ControlPlaneRequest', () => {
     expect(request.issue.targetWorkspaces).toEqual(['create-oma-app'])
     expect(request.issue.targetPaths).toEqual(['packages/create-oma-app/tests/runtime.test.ts'])
     expect(evaluateAdmission(request)).toMatchObject({ status: 'AGENT_READY', mayDevelop: true })
+  })
+
+  it('accounts for one deleted non-authoritative bootstrap status without weakening material revision checks', async () => {
+    const github = new FakeGitHub()
+    const event = labelEvent({ issue: { ...labelEvent().issue, comments: 1 } })
+    const request = await build(github, event, 1)
+    expect(request.issue.comments).toEqual([])
+    expect(evaluateAdmission(request)).toMatchObject({ status: 'AGENT_READY', mayDevelop: true })
+    await expect(build(github, event, 0)).rejects.toMatchObject({ code: 'MATERIAL_COMMENT_SET_CHANGED' })
+    await expect(build(github, event, 2)).rejects.toMatchObject({ code: 'INVALID_BOOTSTRAP_COMMENT_COUNT' })
   })
 
   it('rejects non-agent-ready events, removed labels, and post-label material comments', async () => {
@@ -36,6 +48,7 @@ describe('GitHub event to deterministic ControlPlaneRequest', () => {
     const edited = new FakeGitHub()
     edited.comments.push({
       id: 9,
+      node_id: 'IC_9',
       body: 'Change the acceptance criteria after authorization.',
       created_at: '2026-08-10T17:44:00Z',
       updated_at: '2026-08-10T17:44:00Z',
@@ -96,7 +109,7 @@ describe('GitHub event to deterministic ControlPlaneRequest', () => {
 
   it('fails closed on mismatched or duplicate trusted status metadata', async () => {
     const statusBody = renderStatusComment({
-      version: 1,
+      version: 2,
       repository: REPOSITORY,
       issueNumber: 488,
       status: 'RUNNING',

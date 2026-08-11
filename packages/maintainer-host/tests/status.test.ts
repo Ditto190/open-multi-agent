@@ -7,11 +7,17 @@ import {
   renderStatusComment,
 } from '../src/status.js'
 import { sanitizePublicLine } from '../src/public-output.js'
-import { botComment, REPOSITORY } from './helpers.js'
+import {
+  APP_IDENTITY,
+  FakeGitHub,
+  botComment,
+  githubActionsComment,
+  REPOSITORY,
+} from './helpers.js'
 
 function metadata(overrides: Record<string, unknown> = {}) {
   return {
-    version: 1 as const,
+    version: 2 as const,
     repository: REPOSITORY,
     issueNumber: 488,
     status: 'RUNNING' as const,
@@ -29,23 +35,62 @@ function metadata(overrides: Record<string, unknown> = {}) {
 }
 
 describe('single trusted BOT status comment', () => {
-  it('round-trips machine metadata and ignores a user-forged marker', () => {
+  it('round-trips machine metadata and ignores user and github-actions marker forgeries', async () => {
     const body = renderStatusComment(metadata(), 'Running deterministic checks.')
     expect(parseStatusComment(body)).toMatchObject({ status: 'RUNNING', runKey: 'c'.repeat(64) })
     const forged = { ...botComment(1, body), user: { id: 99, login: 'attacker', type: 'User' } }
-    const trusted = botComment(2, body)
-    expect(findTrustedStatusComment([forged, trusted], REPOSITORY, 488)?.comment.id).toBe(2)
+    const actionsForgery = githubActionsComment(2, body)
+    const trusted = botComment(3, body)
+    const github = new FakeGitHub()
+    github.comments = [forged, actionsForgery, trusted]
+    expect((await findTrustedStatusComment({
+      github,
+      comments: github.comments,
+      identity: APP_IDENTITY,
+      repository: REPOSITORY,
+      issueNumber: 488,
+    }))?.comment.id).toBe(3)
   })
 
-  it('rejects duplicate trusted comments and marker injection', () => {
+  it('rejects duplicate trusted comments, provenance drift, and marker injection', async () => {
     const body = renderStatusComment(metadata(), 'Safe detail.')
-    expect(() => findTrustedStatusComment([botComment(1, body), botComment(2, body)], REPOSITORY, 488))
-      .toThrow(/More than one trusted/)
+    const duplicate = new FakeGitHub()
+    duplicate.comments = [botComment(1, body), botComment(2, body)]
+    await expect(findTrustedStatusComment({
+      github: duplicate,
+      comments: duplicate.comments,
+      identity: APP_IDENTITY,
+      repository: REPOSITORY,
+      issueNumber: 488,
+    })).rejects.toThrow(/More than one trusted/)
     expect(sanitizePublicLine('secret=abc /Users/jack/private <!-- marker -->')).not.toContain('/Users/jack')
     expect(sanitizePublicLine('secret=abc /Users/jack/private <!-- marker -->')).not.toContain('<!--')
     const mismatched = renderStatusComment(metadata({ repository: 'other/repository' }), 'Wrong Issue.')
-    expect(() => findTrustedStatusComment([botComment(3, mismatched)], REPOSITORY, 488))
-      .toThrow(/different repository or Issue/)
+    const wrongRepository = new FakeGitHub()
+    wrongRepository.comments = [botComment(3, mismatched)]
+    await expect(findTrustedStatusComment({
+      github: wrongRepository,
+      comments: wrongRepository.comments,
+      identity: APP_IDENTITY,
+      repository: REPOSITORY,
+      issueNumber: 488,
+    })).rejects.toThrow(/different repository or Issue/)
+
+    const wrongEditor = new FakeGitHub()
+    wrongEditor.comments = [botComment(4, body)]
+    wrongEditor.commentAuthorshipOverrides.set('IC_4', {
+      authorLogin: APP_IDENTITY.botLogin,
+      editorLogin: 'attacker',
+      viewerDidAuthor: true,
+      createdViaEmail: false,
+    })
+    await expect(findTrustedStatusComment({
+      github: wrongEditor,
+      comments: wrongEditor.comments,
+      identity: APP_IDENTITY,
+      repository: REPOSITORY,
+      issueNumber: 488,
+    })).rejects.toThrow(/authorship or editor provenance/)
   })
 
   it('handles claimed, concurrent, duplicate, stale, and fresh-revision reruns deterministically', () => {

@@ -8,7 +8,11 @@ import { runIsolatedEngine } from './engine.js'
 import { GitHubRestClient } from './github.js'
 import { loadProductionPolicy } from './policy.js'
 import { sanitizePublicLine } from './public-output.js'
-import { activationContextSchema, engineResultSchema } from './schema.js'
+import {
+  activationContextSchema,
+  engineResultSchema,
+  githubAppWriterContractSchema,
+} from './schema.js'
 
 const command = process.argv[2] ?? 'help'
 
@@ -37,8 +41,8 @@ try {
 }
 
 async function prepare(): Promise<void> {
-  const token = requireEnv('MAINTAINER_BOT_GITHUB_TOKEN')
-  delete process.env['MAINTAINER_BOT_GITHUB_TOKEN']
+  const token = requireEnv('MAINTAINER_BOT_APP_TOKEN')
+  delete process.env['MAINTAINER_BOT_APP_TOKEN']
   delete process.env['GITHUB_TOKEN']
   delete process.env['GH_TOKEN']
   const [event, policy] = await Promise.all([
@@ -58,7 +62,8 @@ async function prepare(): Promise<void> {
     runUrl: requireFlag('--run-url'),
     baseShaHint: requireFlag('--base-sha'),
     eventSnapshotMatched: booleanFlag('--event-snapshot-matched'),
-    pullRequestCreationAttested: booleanFlag('--pr-creation-attested'),
+    writerContract: writerContractFromFlags(),
+    removedBootstrapCommentCount: nonnegativeInteger(requireFlag('--removed-bootstrap-comment-count')),
   })
   await atomicWriteJson(requireFlag('--activation-out'), context)
   await appendSummary(renderActionsSummary(context))
@@ -81,8 +86,8 @@ async function runEngine(): Promise<void> {
 }
 
 async function finalize(): Promise<void> {
-  const token = requireEnv('MAINTAINER_BOT_GITHUB_TOKEN')
-  delete process.env['MAINTAINER_BOT_GITHUB_TOKEN']
+  const token = requireEnv('MAINTAINER_BOT_APP_TOKEN')
+  delete process.env['MAINTAINER_BOT_APP_TOKEN']
   delete process.env['GITHUB_TOKEN']
   delete process.env['GH_TOKEN']
   const activation = activationContextSchema.parse(await readJson(requireFlag('--activation')))
@@ -97,13 +102,13 @@ async function finalize(): Promise<void> {
     originalEvent: event,
     github: new GitHubRestClient({ token }),
     runner: new NodeCommandRunner(),
-    githubToken: token,
+    githubAppToken: token,
+    writerContract: writerContractFromFlags(),
     repoRoot: resolve(requireFlag('--repo')),
     policy,
     stateDir: resolve(requireFlag('--state-dir')),
     artifactDir: resolve(requireFlag('--artifact-dir')),
     finalizedAt: new Date().toISOString(),
-    pullRequestCreationAttested: booleanFlag('--pr-creation-attested'),
   })
   await atomicWriteJson(requireFlag('--final-out'), result)
   await appendSummary(renderActionsSummary(result))
@@ -181,11 +186,30 @@ function positiveInteger(value: string): number {
   return parsed
 }
 
+function nonnegativeInteger(value: string): number {
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`Expected a non-negative integer, received ${JSON.stringify(value)}.`)
+  return parsed
+}
+
 function booleanFlag(name: string): boolean {
   const value = requireFlag(name)
   if (value === 'true') return true
   if (value === 'false' || value === '') return false
   throw new Error(`${name} must be exactly true or false.`)
+}
+
+function writerContractFromFlags() {
+  return githubAppWriterContractSchema.parse({
+    enabled: booleanFlag('--app-writer-enabled'),
+    expectedAppId: positiveInteger(requireFlag('--expected-app-id')),
+    expectedClientId: requireFlag('--expected-app-client-id'),
+    expectedSlug: requireFlag('--expected-app-slug'),
+    expectedInstallationId: positiveInteger(requireFlag('--expected-app-installation-id')),
+    expectedBotUserId: positiveInteger(requireFlag('--expected-app-bot-user-id')),
+    actualSlug: requireFlag('--app-slug'),
+    actualInstallationId: positiveInteger(requireFlag('--app-installation-id')),
+  })
 }
 
 function printHelp(): void {
@@ -195,5 +219,7 @@ prepare      Re-fetch and validate an issues.labeled event, claim durable BOT st
 run-engine   Spawn the OMA Maintainer Bot in a credential-isolated child process.
 finalize     Re-fetch every authorization fact, run the final safe-output gate, and create at most one Draft PR.
 
-The GitHub token is accepted only by prepare/finalize. DEEPSEEK_API_KEY is accepted only by run-engine.`)
+The GitHub App installation token is accepted only by prepare/finalize. Its expected App ID, client ID,
+slug, installation ID, bot user ID, and operator enablement are verified before model execution and again
+before the writer. DEEPSEEK_API_KEY is accepted only by run-engine.`)
 }

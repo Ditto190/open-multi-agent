@@ -1,4 +1,5 @@
 export * from './activation.js'
+export * from './app-auth.js'
 export * from './engine.js'
 export * from './github.js'
 export * from './markdown.js'

@@ -1,11 +1,13 @@
 import { z } from 'zod'
 import {
   githubActionsRunSchema,
+  githubActorSchema,
   githubCommentSchema,
   githubIssueSchema,
   githubPullRequestSchema,
   githubTimelineEventSchema,
   type GitHubActionsRun,
+  type GitHubActor,
   type GitHubComment,
   type GitHubIssue,
   type GitHubPullRequest,
@@ -17,8 +19,42 @@ const permissionSchema = z.object({
 })
 const branchSchema = z.object({ commit: z.object({ sha: z.string().regex(/^[0-9a-f]{40}$/) }) })
 const repositorySchema = z.object({ default_branch: z.string().min(1), full_name: z.string() })
+const githubAppSchema = z.object({
+  id: z.number().int().positive(),
+  client_id: z.string().min(1),
+  slug: z.string().min(1),
+})
+const installationRepositoriesSchema = z.object({
+  total_count: z.number().int().nonnegative(),
+  repositories: z.array(z.object({ full_name: z.string().regex(/^[^/\s]+\/[^/\s]+$/) })),
+})
+const viewerSchema = z.object({
+  data: z.object({ viewer: z.object({ login: z.string().min(1) }) }),
+})
+const issueCommentAuthorshipSchema = z.object({
+  data: z.object({
+    node: z.object({
+      author: z.object({ login: z.string().min(1) }).nullable(),
+      editor: z.object({ login: z.string().min(1) }).nullable(),
+      viewerDidAuthor: z.boolean(),
+      createdViaEmail: z.boolean(),
+    }).nullable(),
+  }),
+})
+
+export interface GitHubIssueCommentAuthorship {
+  readonly authorLogin: string | null
+  readonly editorLogin: string | null
+  readonly viewerDidAuthor: boolean
+  readonly createdViaEmail: boolean
+}
 
 export interface GitHubClient {
+  getAuthenticatedViewerLogin(): Promise<string>
+  getApp(appSlug: string): Promise<{ id: number; clientId: string; slug: string }>
+  getUser(login: string): Promise<GitHubActor>
+  listInstallationRepositories(): Promise<string[]>
+  getIssueCommentAuthorship(nodeId: string): Promise<GitHubIssueCommentAuthorship>
   getRepository(repository: string): Promise<{ defaultBranch: string; fullName: string }>
   getIssue(repository: string, issueNumber: number): Promise<GitHubIssue>
   listIssueComments(repository: string, issueNumber: number): Promise<GitHubComment[]>
@@ -58,6 +94,56 @@ export class GitHubRestClient implements GitHubClient {
     this.token = options.token
     this.baseUrl = (options.baseUrl ?? 'https://api.github.com').replace(/\/$/, '')
     this.fetchImpl = options.fetchImpl ?? fetch
+  }
+
+  async getAuthenticatedViewerLogin(): Promise<string> {
+    const result = viewerSchema.parse(await this.request('POST', '/graphql', {
+      query: 'query { viewer { login } }',
+    }))
+    return result.data.viewer.login
+  }
+
+  async getApp(appSlug: string): Promise<{ id: number; clientId: string; slug: string }> {
+    const result = githubAppSchema.parse(await this.request('GET', `/apps/${encodeURIComponent(appSlug)}`))
+    return { id: result.id, clientId: result.client_id, slug: result.slug }
+  }
+
+  async getUser(login: string): Promise<GitHubActor> {
+    return githubActorSchema.parse(await this.request('GET', `/users/${encodeURIComponent(login)}`))
+  }
+
+  async listInstallationRepositories(): Promise<string[]> {
+    const result = installationRepositoriesSchema.parse(await this.request(
+      'GET',
+      '/installation/repositories?per_page=100',
+    ))
+    if (result.total_count !== result.repositories.length) {
+      throw new Error('GitHub App installation token repository scope exceeds the deterministic 100-item limit.')
+    }
+    return result.repositories.map(repository => repository.full_name).sort()
+  }
+
+  async getIssueCommentAuthorship(nodeId: string): Promise<GitHubIssueCommentAuthorship> {
+    const result = issueCommentAuthorshipSchema.parse(await this.request('POST', '/graphql', {
+      query: `query OMAStatusCommentAuthorship($id: ID!) {
+        node(id: $id) {
+          ... on IssueComment {
+            author { login }
+            editor { login }
+            viewerDidAuthor
+            createdViaEmail
+          }
+        }
+      }`,
+      variables: { id: nodeId },
+    }))
+    if (result.data.node === null) throw new Error('Trusted Maintainer Bot status comment no longer exists.')
+    return {
+      authorLogin: result.data.node.author?.login ?? null,
+      editorLogin: result.data.node.editor?.login ?? null,
+      viewerDidAuthor: result.data.node.viewerDidAuthor,
+      createdViaEmail: result.data.node.createdViaEmail,
+    }
   }
 
   async getRepository(repository: string): Promise<{ defaultBranch: string; fullName: string }> {

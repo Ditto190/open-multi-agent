@@ -10,10 +10,11 @@ import { parseIssueMarkdown } from './markdown.js'
 import { deriveRiskFlags, resolveTargetWorkspaces } from './policy.js'
 import {
   githubLabelEventSchema,
+  type GitHubAppWriterIdentity,
   type GitHubLabelEvent,
   type ProductionPolicy,
 } from './schema.js'
-import { isTrustedStatusComment, parseStatusComment, STATUS_MARKER } from './status.js'
+import { findTrustedStatusComment } from './status.js'
 import { isMatchingBotDraftPullRequest } from './writer.js'
 
 export class ControlPlaneBuildError extends Error {
@@ -40,12 +41,22 @@ export interface BuildControlPlaneRequestOptions {
   readonly policy: ProductionPolicy
   readonly eventId: string
   readonly receivedAt: string
+  readonly writerIdentity: GitHubAppWriterIdentity
+  readonly removedBootstrapCommentCount?: number
 }
 
 export async function buildControlPlaneRequest(
   options: BuildControlPlaneRequestOptions,
 ): Promise<ControlPlaneRequest> {
   const event = githubLabelEventSchema.parse(options.event)
+  const removedBootstrapCommentCount = options.removedBootstrapCommentCount ?? 0
+  if (!Number.isSafeInteger(removedBootstrapCommentCount) || removedBootstrapCommentCount < 0 || removedBootstrapCommentCount > 1) {
+    throw new ControlPlaneBuildError(
+      'INVALID_BOOTSTRAP_COMMENT_COUNT',
+      'FAILED',
+      ['The trusted bootstrap status cleanup count is invalid.'],
+    )
+  }
   assertCandidateEvent(event, options.policy)
   const repository = event.repository.full_name
   const repositoryMetadata = await options.github.getRepository(repository)
@@ -72,45 +83,34 @@ export async function buildControlPlaneRequest(
   if (!Number.isFinite(eventTimestamp)) {
     throw new ControlPlaneBuildError('INVALID_EVENT_TIMESTAMP', 'FAILED', ['The label event contains an invalid issue timestamp.'])
   }
-  const trustedStatusComments: Array<{
-    comment: typeof comments[number]
-    metadata: NonNullable<ReturnType<typeof parseStatusComment>>
-  }> = []
-  for (const comment of comments) {
-    if (!isTrustedStatusComment(comment) || comment.body === null || !comment.body.includes(STATUS_MARKER)) continue
-    let metadata
-    try {
-      metadata = parseStatusComment(comment.body)
-    } catch {
-      throw new ControlPlaneBuildError(
-        'TRUSTED_STATUS_METADATA_INVALID',
-        'NEEDS_HUMAN',
-        ['The trusted Maintainer Bot status comment contains invalid machine metadata.'],
-      )
-    }
-    if (metadata === null) {
-      throw new ControlPlaneBuildError(
-        'TRUSTED_STATUS_METADATA_INVALID',
-        'NEEDS_HUMAN',
-        ['The trusted Maintainer Bot status comment is missing its machine metadata.'],
-      )
-    }
-    if (metadata.repository !== repository || metadata.issueNumber !== event.issue.number) {
-      throw new ControlPlaneBuildError(
-        'TRUSTED_STATUS_IDENTITY_MISMATCH',
-        'NEEDS_HUMAN',
-        ['The trusted Maintainer Bot status comment belongs to a different repository or Issue.'],
-      )
-    }
-    trustedStatusComments.push({ comment, metadata })
-  }
-  if (trustedStatusComments.length > 1) {
+  let trustedStatus: Awaited<ReturnType<typeof findTrustedStatusComment>>
+  try {
+    trustedStatus = await findTrustedStatusComment({
+      github: options.github,
+      comments,
+      identity: options.writerIdentity,
+      repository,
+      issueNumber: event.issue.number,
+    })
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    const mismatch = detail.includes('different repository or Issue')
+    const duplicate = detail.includes('More than one trusted')
     throw new ControlPlaneBuildError(
-      'MULTIPLE_TRUSTED_STATUS_COMMENTS',
+      mismatch
+        ? 'TRUSTED_STATUS_IDENTITY_MISMATCH'
+        : duplicate
+          ? 'MULTIPLE_TRUSTED_STATUS_COMMENTS'
+          : 'TRUSTED_STATUS_METADATA_INVALID',
       'NEEDS_HUMAN',
-      ['More than one trusted Maintainer Bot status comment exists for this Issue.'],
+      [mismatch
+        ? 'The trusted Maintainer Bot status comment belongs to a different repository or Issue.'
+        : duplicate
+          ? 'More than one trusted Maintainer Bot status comment exists for this Issue.'
+          : 'The trusted Maintainer Bot status comment has invalid metadata or App authorship provenance.'],
     )
   }
+  const trustedStatusComments = trustedStatus === null ? [] : [trustedStatus]
   const trustedBotPullRequestNumbers = new Set<number>()
   const priorStatus = trustedStatusComments[0]?.metadata
   if (
@@ -128,6 +128,7 @@ export async function buildControlPlaneRequest(
         repositoryMetadata.defaultBranch,
         priorStatus.baseSha,
         priorStatus.branch,
+        options.writerIdentity,
       )
     ) {
       trustedBotPullRequestNumbers.add(pulls[0]!.number)
@@ -138,7 +139,9 @@ export async function buildControlPlaneRequest(
   const preAuthorizationTrustedCount = trustedStatusComments.filter(item =>
     item.metadata.claimId !== options.eventId
     && Date.parse(item.comment.created_at) <= eventTimestamp).length
-  const expectedMaterialCommentCount = event.issue.comments - preAuthorizationTrustedCount
+  const expectedMaterialCommentCount = event.issue.comments
+    - preAuthorizationTrustedCount
+    - removedBootstrapCommentCount
   const postAuthorizationComment = materialComments.find(comment => Date.parse(comment.updated_at) > eventTimestamp)
   if (postAuthorizationComment !== undefined) {
     throw new ControlPlaneBuildError(

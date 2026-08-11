@@ -11,6 +11,7 @@ import {
   type CommandRunner,
 } from '@open-multi-agent/maintainer-bot'
 import type { GitHubClient } from './github.js'
+import { sameGitHubAppWriterIdentity, verifyGitHubAppWriter } from './app-auth.js'
 import { buildProductionConfig, deterministicBranchName } from './policy.js'
 import { sanitizePublicLine } from './public-output.js'
 import { buildControlPlaneRequest, ControlPlaneBuildError } from './request.js'
@@ -22,6 +23,8 @@ import {
   type ActivationContext,
   type ActivationStatus,
   type EngineResult,
+  type GitHubAppWriterContract,
+  type GitHubAppWriterIdentity,
   type ProductionPolicy,
   type StatusMetadata,
 } from './schema.js'
@@ -29,7 +32,6 @@ import {
   decideClaim,
   findTrustedStatusComment,
   isActionsRunActive,
-  renderStatusComment,
   upsertStatusComment,
 } from './status.js'
 import { isMatchingBotDraftPullRequest, writeDraftPullRequest } from './writer.js'
@@ -47,16 +49,23 @@ export interface PrepareActivationOptions {
   readonly runUrl: string
   readonly baseShaHint: string
   readonly eventSnapshotMatched: boolean
-  readonly pullRequestCreationAttested: boolean
+  readonly writerContract: GitHubAppWriterContract
+  readonly removedBootstrapCommentCount: number
 }
 
 export async function prepareActivation(options: PrepareActivationOptions): Promise<ActivationContext> {
   const event = githubLabelEventSchema.parse(options.event)
   const repository = event.repository.full_name
   const issueNumber = event.issue.number
+  const writerIdentity = await verifyGitHubAppWriter({
+    github: options.github,
+    repository,
+    contract: options.writerContract,
+  })
   if (!options.eventSnapshotMatched) {
     return terminalPreparation(
       options,
+      writerIdentity,
       'NEEDS_HUMAN',
       'The Issue changed between the labeled event and the first trusted GitHub snapshot. Revalidate the material Issue revision before applying agent-ready again.',
       null,
@@ -71,14 +80,17 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
       policy: options.policy,
       eventId: options.eventId,
       receivedAt: options.receivedAt,
+      writerIdentity,
+      removedBootstrapCommentCount: options.removedBootstrapCommentCount,
     })
   } catch (error) {
     if (!(error instanceof ControlPlaneBuildError)) throw error
-    return terminalPreparation(options, error.publicStatus, error.reasons.join(' '), null, null)
+    return terminalPreparation(options, writerIdentity, error.publicStatus, error.reasons.join(' '), null, null)
   }
   if (request.baseSha !== options.baseShaHint) {
     return terminalPreparation(
       options,
+      writerIdentity,
       'NEEDS_HUMAN',
       'The checked-out base SHA differs from the current trusted default-branch SHA.',
       request.authorization?.issueRevision ?? null,
@@ -94,6 +106,7 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
   if (localHead !== request.baseSha || localStatus.length > 0) {
     return terminalPreparation(
       options,
+      writerIdentity,
       'NEEDS_HUMAN',
       'The isolated runner checkout is not clean at the fixed default-branch base SHA.',
       request.authorization?.issueRevision ?? null,
@@ -105,6 +118,7 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
   if (!admission.mayDevelop) {
     return terminalPreparation(
       options,
+      writerIdentity,
       publicStatusForAdmission(admission.status),
       admission.reasons.join(' '),
       admission.issueRevision,
@@ -118,6 +132,7 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
   } catch (error) {
     return terminalPreparation(
       options,
+      writerIdentity,
       'NEEDS_HUMAN',
       error instanceof Error ? error.message : String(error),
       admission.issueRevision,
@@ -133,14 +148,20 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
   })
   const branch = deterministicBranchName(options.policy, issueNumber, admission.issueRevision)
   const comments = await options.github.listIssueComments(repository, issueNumber)
-  const trusted = findTrustedStatusComment(comments, repository, issueNumber)
+  const trusted = await findTrustedStatusComment({
+    github: options.github,
+    comments,
+    identity: writerIdentity,
+    repository,
+    issueNumber,
+  })
   let existingRunActive = false
   if (trusted !== null && trusted.metadata.actionsRunId !== options.actionsRunId) {
     const existingRun = await options.github.getActionsRun(repository, trusted.metadata.actionsRunId)
     existingRunActive = isActionsRunActive(existingRun?.status)
   }
   const runningMetadata = statusMetadataSchema.parse({
-    version: 1,
+    version: 2,
     repository,
     issueNumber,
     status: 'RUNNING',
@@ -164,6 +185,7 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
         repositoryMetadata.defaultBranch,
         request.baseSha,
         branch,
+        writerIdentity,
       )
     if (matching) {
       const metadata = statusMetadataSchema.parse({
@@ -173,6 +195,7 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
       })
       const comment = await upsertStatusComment({
         github: options.github,
+        identity: writerIdentity,
         repository,
         issueNumber,
         comments,
@@ -187,7 +210,8 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
         runUrl: options.runUrl,
         commentId: comment.id,
         branch,
-        pullRequestCreationAttested: options.pullRequestCreationAttested,
+        writerIdentity,
+        removedBootstrapCommentCount: options.removedBootstrapCommentCount,
         request,
         config,
         admission,
@@ -197,6 +221,7 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
     }
     return terminalPreparation(
       options,
+      writerIdentity,
       'NEEDS_HUMAN',
       'The deterministic head branch is associated with conflicting or untrusted pull request state.',
       admission.issueRevision,
@@ -208,19 +233,9 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
   if (await options.github.getBranchSha(repository, branch) !== null) {
     return terminalPreparation(
       options,
+      writerIdentity,
       'NEEDS_HUMAN',
       'The deterministic remote branch exists without a matching trusted open Draft PR.',
-      admission.issueRevision,
-      runKey,
-      admission,
-      branch,
-    )
-  }
-  if (!options.pullRequestCreationAttested) {
-    return terminalPreparation(
-      options,
-      'NEEDS_HUMAN',
-      'Trusted repository attestation for the Actions pull-request creation setting is absent. An administrator must verify the setting and publish the documented repository variable before a live canary.',
       admission.issueRevision,
       runKey,
       admission,
@@ -230,14 +245,15 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
   const claim = decideClaim({ existing: trusted?.metadata ?? null, candidate: runningMetadata, existingRunActive })
   if (claim.kind !== 'claimed') {
     if (claim.kind === 'duplicate') {
-      const restored = await options.github.updateIssueComment(
+      const restored = await upsertStatusComment({
+        github: options.github,
+        identity: writerIdentity,
         repository,
-        trusted!.comment.id,
-        renderStatusComment(
-          trusted!.metadata,
-          `${claim.detail} Candidate Actions run ${options.runUrl} performed no model or writer action.`,
-        ),
-      )
+        issueNumber,
+        comments,
+        metadata: trusted!.metadata,
+        detail: `${claim.detail} Candidate Actions run ${options.runUrl} performed no model or writer action.`,
+      })
       return activationContextSchema.parse({
         schemaVersion: 1,
         shouldRun: false,
@@ -246,7 +262,8 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
         runUrl: options.runUrl,
         commentId: restored.id,
         branch: trusted!.metadata.branch,
-        pullRequestCreationAttested: options.pullRequestCreationAttested,
+        writerIdentity,
+        removedBootstrapCommentCount: options.removedBootstrapCommentCount,
         request,
         config,
         admission,
@@ -255,14 +272,15 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
       })
     }
     if (claim.kind === 'concurrent') {
-      const restored = await options.github.updateIssueComment(
+      const restored = await upsertStatusComment({
+        github: options.github,
+        identity: writerIdentity,
         repository,
-        trusted!.comment.id,
-        renderStatusComment(
-          trusted!.metadata,
-          `${claim.detail} Candidate Actions run ${options.runUrl} performed no model or writer action.`,
-        ),
-      )
+        issueNumber,
+        comments,
+        metadata: trusted!.metadata,
+        detail: `${claim.detail} Candidate Actions run ${options.runUrl} performed no model or writer action.`,
+      })
       return activationContextSchema.parse({
         schemaVersion: 1,
         shouldRun: false,
@@ -271,7 +289,8 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
         runUrl: options.runUrl,
         commentId: restored.id,
         branch: trusted!.metadata.branch,
-        pullRequestCreationAttested: options.pullRequestCreationAttested,
+        writerIdentity,
+        removedBootstrapCommentCount: options.removedBootstrapCommentCount,
         request,
         config,
         admission,
@@ -281,6 +300,7 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
     }
     return terminalPreparation(
       options,
+      writerIdentity,
       'NEEDS_HUMAN',
       claim.detail,
       admission.issueRevision,
@@ -292,6 +312,7 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
 
   const comment = await upsertStatusComment({
     github: options.github,
+    identity: writerIdentity,
     repository,
     issueNumber,
     comments,
@@ -306,7 +327,8 @@ export async function prepareActivation(options: PrepareActivationOptions): Prom
     runUrl: options.runUrl,
     commentId: comment.id,
     branch,
-    pullRequestCreationAttested: options.pullRequestCreationAttested,
+    writerIdentity,
+    removedBootstrapCommentCount: options.removedBootstrapCommentCount,
     request,
     config,
     admission,
@@ -321,13 +343,13 @@ export async function finalizeActivation(options: {
   readonly originalEvent: unknown
   readonly github: GitHubClient
   readonly runner: CommandRunner
-  readonly githubToken: string
+  readonly githubAppToken: string
+  readonly writerContract: GitHubAppWriterContract
   readonly repoRoot: string
   readonly policy: ProductionPolicy
   readonly stateDir: string
   readonly artifactDir: string
   readonly finalizedAt: string
-  readonly pullRequestCreationAttested: boolean
 }): Promise<ActivationContext> {
   const activation = activationContextSchema.parse(options.activation)
   const engine = engineResultSchema.parse(options.engineResult)
@@ -336,6 +358,14 @@ export async function finalizeActivation(options: {
     throw new Error('Runnable activation is missing request, configuration, or admission evidence.')
   }
   const request = activation.request
+  const writerIdentity = await verifyGitHubAppWriter({
+    github: options.github,
+    repository: request.issue.repository,
+    contract: options.writerContract,
+  })
+  if (!sameGitHubAppWriterIdentity(writerIdentity, activation.writerIdentity)) {
+    throw new Error('The verified GitHub App writer identity changed between prepare and finalize.')
+  }
   const runKey = computeRunKey({
     repository: request.issue.repository,
     issueNumber: request.issue.number,
@@ -355,6 +385,8 @@ export async function finalizeActivation(options: {
       policy: options.policy,
       eventId: request.eventId,
       receivedAt: request.receivedAt,
+      writerIdentity,
+      removedBootstrapCommentCount: activation.removedBootstrapCommentCount,
     })
   } catch (error) {
     const detail = error instanceof ControlPlaneBuildError ? error.reasons.join(' ') : 'Final GitHub revalidation failed.'
@@ -377,17 +409,14 @@ export async function finalizeActivation(options: {
       runKey,
     )
   }
-  if (!activation.pullRequestCreationAttested || !options.pullRequestCreationAttested) {
-    return updateTerminalActivation(
-      options,
-      activation,
-      'NEEDS_HUMAN',
-      'Trusted repository attestation for the Actions pull-request creation setting is absent at the final writer gate.',
-      runKey,
-    )
-  }
   const comments = await options.github.listIssueComments(request.issue.repository, request.issue.number)
-  const trusted = findTrustedStatusComment(comments, request.issue.repository, request.issue.number)
+  const trusted = await findTrustedStatusComment({
+    github: options.github,
+    comments,
+    identity: writerIdentity,
+    repository: request.issue.repository,
+    issueNumber: request.issue.number,
+  })
   if (
     trusted === null
     || trusted.comment.id !== activation.commentId
@@ -415,7 +444,8 @@ export async function finalizeActivation(options: {
       repoRoot: options.repoRoot,
       runner: options.runner,
       github: options.github,
-      githubToken: options.githubToken,
+      githubAppToken: options.githubAppToken,
+      writerIdentity,
       policy: options.policy,
       request: currentRequest,
       config: activation.config,
@@ -434,7 +464,7 @@ export async function finalizeActivation(options: {
     })
     const finalComments = await options.github.listIssueComments(request.issue.repository, request.issue.number)
     const metadata = statusMetadataSchema.parse({
-      version: 1,
+      version: 2,
       repository: request.issue.repository,
       issueNumber: request.issue.number,
       status: 'DRAFT_PR_CREATED',
@@ -450,6 +480,7 @@ export async function finalizeActivation(options: {
     })
     const comment = await upsertStatusComment({
       github: options.github,
+      identity: writerIdentity,
       repository: request.issue.repository,
       issueNumber: request.issue.number,
       comments: finalComments,
@@ -479,6 +510,7 @@ export async function finalizeActivation(options: {
 
 async function terminalPreparation(
   options: PrepareActivationOptions,
+  writerIdentity: GitHubAppWriterIdentity,
   status: ActivationStatus,
   detail: string,
   issueRevision: string | null,
@@ -489,7 +521,7 @@ async function terminalPreparation(
   const event = githubLabelEventSchema.parse(options.event)
   const comments = await options.github.listIssueComments(event.repository.full_name, event.issue.number)
   const metadata = statusMetadataSchema.parse({
-    version: 1,
+    version: 2,
     repository: event.repository.full_name,
     issueNumber: event.issue.number,
     status,
@@ -505,6 +537,7 @@ async function terminalPreparation(
   })
   const comment = await upsertStatusComment({
     github: options.github,
+    identity: writerIdentity,
     repository: event.repository.full_name,
     issueNumber: event.issue.number,
     comments,
@@ -519,7 +552,8 @@ async function terminalPreparation(
     runUrl: options.runUrl,
     commentId: comment.id,
     branch,
-    pullRequestCreationAttested: options.pullRequestCreationAttested,
+    writerIdentity,
+    removedBootstrapCommentCount: options.removedBootstrapCommentCount,
     request: null,
     config: null,
     admission,
@@ -538,7 +572,7 @@ async function updateTerminalActivation(
   const request = activation.request!
   const comments = await options.github.listIssueComments(request.issue.repository, request.issue.number)
   const metadata = statusMetadataSchema.parse({
-    version: 1,
+    version: 2,
     repository: request.issue.repository,
     issueNumber: request.issue.number,
     status,
@@ -554,6 +588,7 @@ async function updateTerminalActivation(
   })
   const comment = await upsertStatusComment({
     github: options.github,
+    identity: activation.writerIdentity,
     repository: request.issue.repository,
     issueNumber: request.issue.number,
     comments,
