@@ -188,10 +188,14 @@ export async function buildControlPlaneRequest(
   try {
     targetWorkspaces = resolveTargetWorkspaces(options.policy, markdown.value.targetPaths)
   } catch (error) {
+    const policyDetail = error instanceof Error ? error.message : String(error)
     throw new ControlPlaneBuildError(
       'TARGET_POLICY_REJECTED',
-      'NEEDS_CLARIFICATION',
-      [error instanceof Error ? error.message : String(error)],
+      'NEEDS_HUMAN',
+      [
+        'The requested target path is blocked by repository production policy. The model was not run. A maintainer must update the production policy, recheck the Issue, and reauthorize it against the new default-branch base.',
+        `Policy detail: ${policyDetail}`,
+      ],
     )
   }
   const issue = maintainerIssueSchema.parse({

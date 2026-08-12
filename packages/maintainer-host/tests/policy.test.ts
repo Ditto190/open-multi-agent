@@ -28,6 +28,23 @@ describe('trusted production policy and command registry', () => {
       .toEqual(['OMA_MODEL'])
   })
 
+  it('accepts only the enumerated OTel README and selects the full OTel validation suite', async () => {
+    const policy = await productionPolicy()
+    const path = 'packages/otel/README.md'
+    expect(resolveTargetWorkspaces(policy, [path])).toEqual(['@open-multi-agent/otel'])
+    expect(buildProductionConfig(policy, [path]).validationCommands.map(command => command.id)).toEqual([
+      'git-diff-check',
+      'otel-lint',
+      'otel-test',
+      'otel-build',
+    ])
+
+    expect(() => resolveTargetWorkspaces(policy, ['packages/otel/package.json']))
+      .toThrow(/outside the trusted production allowlist/)
+    expect(() => resolveTargetWorkspaces(policy, ['packages/otel/CHANGELOG.md']))
+      .toThrow(/outside the trusted production allowlist/)
+  })
+
   it('routes workflow, permission, public-entry, and cross-workspace requests to manual risks', async () => {
     const policy = await productionPolicy()
     expect(deriveRiskFlags({

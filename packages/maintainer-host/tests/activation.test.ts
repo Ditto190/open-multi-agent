@@ -26,6 +26,8 @@ import {
   RecordingRunner,
   REPOSITORY,
   SECOND_SHA,
+  ISSUE_BODY,
+  cleanRunner,
   labelEvent,
   ok,
 } from './helpers.js'
@@ -224,6 +226,65 @@ describe('mocked GitHub + scripted OMA activation path', () => {
     expect(context).toMatchObject({ shouldRun: false, status: 'NEEDS_HUMAN' })
     expect(context.detail).toMatch(/changed between the labeled event and the first trusted GitHub snapshot/)
     expect(github.createdPullRequests).toBe(0)
+  })
+
+  it('publishes NEEDS_HUMAN and stops before local or model work when production policy rejects the target', async () => {
+    const github = new FakeGitHub()
+    github.issue.body = ISSUE_BODY.replaceAll(
+      'packages/create-oma-app/tests/runtime.test.ts',
+      'packages/otel/package.json',
+    )
+    const event = labelEvent({ issue: { ...labelEvent().issue, body: github.issue.body } })
+    const runner = cleanRunner()
+    const context = await prepareActivation({
+      event,
+      github,
+      runner,
+      repoRoot: '/unused-before-policy-admission',
+      policy: await productionPolicy(),
+      eventId: '104.1',
+      receivedAt: '2026-08-10T18:05:00Z',
+      claimId: '104.1',
+      actionsRunId: 104,
+      runUrl: `https://github.com/${REPOSITORY}/actions/runs/104`,
+      baseShaHint: BASE_SHA,
+      eventSnapshotMatched: true,
+      writerContract: APP_CONTRACT,
+      removedBootstrapCommentCount: 0,
+    })
+    expect(context).toMatchObject({ shouldRun: false, status: 'NEEDS_HUMAN' })
+    expect(context.detail).toContain('blocked by repository production policy')
+    expect(context.detail).toContain('The model was not run')
+    expect(context.detail).toContain('reauthorize')
+    expect(runner.calls).toEqual([])
+    expect(github.comments.at(-1)?.body).toContain('OMA Maintainer Bot — NEEDS_HUMAN')
+    expect(github.comments.at(-1)?.body).not.toContain('NEEDS_CLARIFICATION')
+  })
+
+  it('keeps incomplete Issue Markdown as NEEDS_CLARIFICATION before model work', async () => {
+    const github = new FakeGitHub()
+    github.issue.body = '## Problem\n\nMissing the required fields.'
+    const event = labelEvent({ issue: { ...labelEvent().issue, body: github.issue.body } })
+    const runner = cleanRunner()
+    const context = await prepareActivation({
+      event,
+      github,
+      runner,
+      repoRoot: '/unused-before-markdown-admission',
+      policy: await productionPolicy(),
+      eventId: '105.1',
+      receivedAt: '2026-08-10T18:06:00Z',
+      claimId: '105.1',
+      actionsRunId: 105,
+      runUrl: `https://github.com/${REPOSITORY}/actions/runs/105`,
+      baseShaHint: BASE_SHA,
+      eventSnapshotMatched: true,
+      writerContract: APP_CONTRACT,
+      removedBootstrapCommentCount: 0,
+    })
+    expect(context).toMatchObject({ shouldRun: false, status: 'NEEDS_CLARIFICATION' })
+    expect(runner.calls).toEqual([])
+    expect(github.comments.at(-1)?.body).toContain('OMA Maintainer Bot — NEEDS_CLARIFICATION')
   })
 
   it('never invokes the writer after a failed engine result', async () => {

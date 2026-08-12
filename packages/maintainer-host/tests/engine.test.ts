@@ -1,5 +1,9 @@
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { assertNoHostCredentials, buildIsolatedModelEnvironment } from '../src/engine.js'
+import { assertNoHostCredentials, buildIsolatedModelEnvironment, runIsolatedEngine } from '../src/engine.js'
+import { APP_IDENTITY } from './helpers.js'
 
 describe('credential-isolated model process environment', () => {
   it('allows only DeepSeek plus the minimal non-secret runtime environment', () => {
@@ -37,5 +41,45 @@ describe('credential-isolated model process environment', () => {
       DEEPSEEK_API_KEY: 'allowed',
       ACTIONS_RUNTIME_TOKEN: 'forbidden',
     })).toThrow(/ACTIONS_RUNTIME_TOKEN/)
+  })
+
+  it('does not invoke the model process for a non-runnable policy terminal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'oma-maintainer-engine-skip-'))
+    const activationPath = join(root, 'activation.json')
+    const resultPath = join(root, 'engine-result.json')
+    const detail = 'The requested target path is blocked by repository production policy. The model was not run.'
+    await writeFile(activationPath, JSON.stringify({
+      schemaVersion: 1,
+      shouldRun: false,
+      claimId: '104.1',
+      actionsRunId: 104,
+      runUrl: 'https://github.com/open-multi-agent/open-multi-agent/actions/runs/104',
+      commentId: 1,
+      branch: null,
+      writerIdentity: APP_IDENTITY,
+      removedBootstrapCommentCount: 0,
+      request: null,
+      config: null,
+      admission: null,
+      status: 'NEEDS_HUMAN',
+      detail,
+    }))
+
+    const result = await runIsolatedEngine({
+      activationPath,
+      resultPath,
+      repoRoot: root,
+      stateDir: join(root, 'state'),
+      artifactDir: join(root, 'artifacts'),
+      maintainerBotCli: join(root, 'must-not-be-invoked.js'),
+    })
+    expect(result).toEqual({
+      schemaVersion: 1,
+      attempted: false,
+      exitCode: 0,
+      status: 'NEEDS_HUMAN',
+      detail,
+    })
+    expect(JSON.parse(await readFile(resultPath, 'utf8'))).toEqual(result)
   })
 })

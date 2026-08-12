@@ -388,11 +388,18 @@ report pre-model `NEEDS_HUMAN`; it is not part of the durable state machine.
 
 - `STARTED`: the label delivery is visible and deterministic checks are starting.
 - `RUNNING`: fixed revision/base, permission, DoR, scope, duplicate, and App identity/installation checks passed; the isolated engine is running.
-- `NEEDS_CLARIFICATION`: the strict Issue template or Definition of Ready is incomplete or conflicting.
-- `MANUAL_ONLY`: policy classifies the work as architecture, security, permissions, privacy, license, CI/release, broad API/refactor, uncontrolled dependency, or otherwise human-only.
-- `NEEDS_HUMAN`: stale/crashed state, drift, App configuration/identity, conflicting branch/PR, or safety gate requires intervention.
+- `NEEDS_CLARIFICATION`: the Issue content, required format, or acceptance information is incomplete or conflicting, so the Definition of Ready cannot be established.
+- `MANUAL_ONLY`: the task category itself is not eligible for automated development, including architecture, security, permissions, privacy, license, CI/release, broad API/refactor, or uncontrolled dependency work.
+- `NEEDS_HUMAN`: repository policy or authorization must be revised, or the environment, control plane, stale/crashed state, drift, App configuration/identity, conflicting branch/PR, or another safety gate requires maintainer intervention. A production-policy rejection stops before model execution and is not a request for more Issue detail.
 - `FAILED`: infrastructure or engine failure produced no eligible Draft PR.
 - `DRAFT_PR_CREATED`: exactly one open Draft PR exists; human review remains required.
+
+When an otherwise complete Issue targets a path missing from the production
+allowlist, a maintainer must first merge the narrow policy correction. The
+maintainer then rechecks the Issue against the updated policy, removes and
+re-adds `agent-ready`, and thereby authorizes a fresh run against the new
+default-branch base. The blocked run is never resumed and its old label event
+does not authorize work on the newer base.
 
 To configure activation without exposing credential values:
 
