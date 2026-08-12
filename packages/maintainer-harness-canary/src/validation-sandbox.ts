@@ -1,5 +1,5 @@
 import { dirname, relative, resolve, sep } from 'node:path'
-import { readdir, realpath } from 'node:fs/promises'
+import { lstat, readFile, readdir, realpath } from 'node:fs/promises'
 import {
   NodeCommandRunner,
   type CommandResult,
@@ -15,6 +15,8 @@ import {
   assertValidationWorkspaceIntegrity,
   cleanupValidationWorkspace,
   createValidationWorkspace,
+  VALIDATION_HOSTS,
+  VALIDATION_NSSWITCH,
   type ValidationWorkspace,
 } from './validation-workspace.js'
 
@@ -72,12 +74,16 @@ export interface ValidationSandboxInvocation {
 export async function buildValidationSandboxInvocation(options: {
   readonly workspaceRoot: string
   readonly dependencyRoot: string
+  readonly resolverHostsPath: string
+  readonly resolverNsswitchPath: string
   readonly command: ValidationCommand
   readonly nodeExecutable?: string
 }): Promise<ValidationSandboxInvocation> {
   assertPolicyEnvironment(options.command)
   const workspaceRoot = await realpath(resolve(options.workspaceRoot))
   const dependencyRoot = await realpath(resolve(options.dependencyRoot))
+  const resolverHostsPath = await resolveValidationResolverFile(options.resolverHostsPath, VALIDATION_HOSTS)
+  const resolverNsswitchPath = await resolveValidationResolverFile(options.resolverNsswitchPath, VALIDATION_NSSWITCH)
   const gitMetadataRoot = await realpath(resolve(workspaceRoot, '.git'))
   const hostCwd = await realpath(resolve(workspaceRoot, options.command.cwd))
   const cwdRelation = relative(workspaceRoot, hostCwd)
@@ -118,6 +124,9 @@ export async function buildValidationSandboxInvocation(options: {
     '--tmpfs', '/tmp',
     '--tmpfs', '/home',
     '--dir', '/home/validation',
+    '--dir', '/etc',
+    '--ro-bind', resolverHostsPath, '/etc/hosts',
+    '--ro-bind', resolverNsswitchPath, '/etc/nsswitch.conf',
     '--ro-bind', '/usr', '/usr',
     '--symlink', 'usr/bin', '/bin',
     '--symlink', 'usr/lib', '/lib',
@@ -143,9 +152,24 @@ export async function buildValidationSandboxInvocation(options: {
   }
 }
 
+async function resolveValidationResolverFile(path: string, expected: string): Promise<string> {
+  const requestedPath = resolve(path)
+  const requestedInfo = await lstat(requestedPath)
+  if (!requestedInfo.isFile() || requestedInfo.isSymbolicLink()) {
+    throw new ValidationSandboxError('Validation resolver configuration must be a regular file.')
+  }
+  const canonicalPath = await realpath(requestedPath)
+  if (await readFile(canonicalPath, 'utf8') !== expected) {
+    throw new ValidationSandboxError('Validation resolver configuration differs from the fixed loopback policy.')
+  }
+  return canonicalPath
+}
+
 export async function runValidationInSandbox(options: {
   readonly workspaceRoot: string
   readonly dependencyRoot: string
+  readonly resolverHostsPath: string
+  readonly resolverNsswitchPath: string
   readonly command: ValidationCommand
   readonly maxOutputBytes: number
   readonly runner?: SandboxProcessRunner
@@ -179,15 +203,25 @@ export async function preflightValidationSandbox(options: {
     command: process.execPath,
     args: ['--eval', `
 const { realpathSync, unlinkSync, writeFileSync } = require('node:fs')
+const { lookup } = require('node:dns').promises
 const temporary = '/workspace/packages/core/vitest.config.ts.timestamp-oma-preflight.mjs'
-try {
-  writeFileSync(temporary, 'export default {}\\n')
-} finally {
-  unlinkSync(temporary)
-}
-if (realpathSync('/workspace/node_modules/@open-multi-agent/core') !== '/workspace/packages/core') {
-  throw new Error('Workspace dependency symlink escaped the disposable snapshot.')
-}
+;(async () => {
+  try {
+    writeFileSync(temporary, 'export default {}\\n')
+  } finally {
+    unlinkSync(temporary)
+  }
+  if (realpathSync('/workspace/node_modules/@open-multi-agent/core') !== '/workspace/packages/core') {
+    throw new Error('Workspace dependency symlink escaped the disposable snapshot.')
+  }
+  const addresses = await lookup('localhost', { all: true })
+  if (addresses.length === 0 || addresses.some(({ address }) => address !== '127.0.0.1' && address !== '::1')) {
+    throw new Error('Sandbox localhost resolution escaped the loopback boundary.')
+  }
+})().catch(error => {
+  console.error(error instanceof Error ? error.message : 'Sandbox preflight failed.')
+  process.exitCode = 1
+})
 `],
     cwd: '.',
     timeoutMs: 30_000,
@@ -208,6 +242,8 @@ if (realpathSync('/workspace/node_modules/@open-multi-agent/core') !== '/workspa
     result = await runValidationInSandbox({
       workspaceRoot: workspace.repoRoot,
       dependencyRoot: workspace.dependencyRoot,
+      resolverHostsPath: workspace.resolverHostsPath,
+      resolverNsswitchPath: workspace.resolverNsswitchPath,
       command,
       maxOutputBytes: 10_000,
       runner: options.runner,

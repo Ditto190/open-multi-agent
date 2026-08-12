@@ -29,6 +29,8 @@ import {
   type FailedCanaryArtifact,
   type RawIssueSnapshot,
   type SandboxProcessRunner,
+  VALIDATION_HOSTS,
+  VALIDATION_NSSWITCH,
   ValidationSandboxPreflightError,
 } from '../src/index.js'
 
@@ -120,6 +122,13 @@ class StrictMockValidationSandboxRunner implements SandboxProcessRunner {
       '--die-with-parent', '--new-session', '--unshare-user', '--unshare-pid', '--unshare-net',
       '--cap-drop', 'ALL', '--proc', '/proc', '--tmpfs', '/tmp', '--tmpfs', '/home', '--clearenv',
     ]))
+    const hostsBind = args.findIndex((value, index) => value === '--ro-bind' && args[index + 2] === '/etc/hosts')
+    const nsswitchBind = args.findIndex((value, index) => value === '--ro-bind' && args[index + 2] === '/etc/nsswitch.conf')
+    expect(hostsBind).toBeGreaterThanOrEqual(0)
+    expect(nsswitchBind).toBeGreaterThanOrEqual(0)
+    expect(await readFile(args[hostsBind + 1]!, 'utf8')).toBe(VALIDATION_HOSTS)
+    expect(await readFile(args[nsswitchBind + 1]!, 'utf8')).toBe(VALIDATION_NSSWITCH)
+    expect(args).not.toContain('/etc/resolv.conf')
     if (this.boundedFailure !== undefined) throw this.boundedFailure
     if (this.forcedExitCode !== undefined) {
       return { stdout: '', stderr: 'mock sandbox setup failed\n', exitCode: this.forcedExitCode }
@@ -371,6 +380,8 @@ describe('fail-closed deterministic validation sandbox', () => {
       parentDir: parent,
     })
     expect(await readFile(join(workspace.repoRoot, BASE_FILE), 'utf8')).toBe(candidate)
+    expect(await readFile(workspace.resolverHostsPath, 'utf8')).toBe(VALIDATION_HOSTS)
+    expect(await readFile(workspace.resolverNsswitchPath, 'utf8')).toBe(VALIDATION_NSSWITCH)
     expect(await fileExists(join(workspace.repoRoot, 'ignored-host.txt'))).toBe(false)
     expect(await fileExists(join(workspace.repoRoot, 'untracked-host.txt'))).toBe(false)
     expect((await exec('git', ['rev-parse', 'HEAD'], { cwd: workspace.repoRoot })).stdout.trim()).toBe(fixture.baseSha)
@@ -396,6 +407,8 @@ describe('fail-closed deterministic validation sandbox', () => {
       const invocation = await buildValidationSandboxInvocation({
         workspaceRoot: workspace.repoRoot,
         dependencyRoot: workspace.dependencyRoot,
+        resolverHostsPath: workspace.resolverHostsPath,
+        resolverNsswitchPath: workspace.resolverNsswitchPath,
         command,
       })
       const canonicalWorkspace = await realpath(workspace.repoRoot)
@@ -408,6 +421,9 @@ describe('fail-closed deterministic validation sandbox', () => {
         '--unshare-ipc', '--unshare-uts', '--proc', '/proc', '--dev', '/dev',
         '--cap-drop', 'ALL',
         '--tmpfs', '/tmp', '--tmpfs', '/home', '--clearenv',
+        '--dir', '/etc',
+        '--ro-bind', workspace.resolverHostsPath, '/etc/hosts',
+        '--ro-bind', workspace.resolverNsswitchPath, '/etc/nsswitch.conf',
         '--bind', canonicalWorkspace, '/workspace',
         '--ro-bind', join(canonicalWorkspace, '.git'), '/workspace/.git',
         '--ro-bind', workspace.dependencyRoot, '/workspace/node_modules',
@@ -419,6 +435,7 @@ describe('fail-closed deterministic validation sandbox', () => {
       expect(invocation.args).not.toContain(fixture.harnessDir)
       expect(invocation.args).not.toContain(process.env['HOME'])
       expect(invocation.args).not.toContain(process.env['RUNNER_TEMP'])
+      expect(invocation.args).not.toContain('/etc/resolv.conf')
       expect(await readlink(join(workspace.dependencyRoot, '@open-multi-agent/core'))).toBe('../../packages/core')
     } finally {
       await cleanupValidationWorkspace(workspace)
@@ -433,8 +450,34 @@ describe('fail-closed deterministic validation sandbox', () => {
       await expect(buildValidationSandboxInvocation({
         workspaceRoot: fixture.root,
         dependencyRoot: join(fixture.root, 'node_modules'),
+        resolverHostsPath: join(fixture.root, 'package.json'),
+        resolverNsswitchPath: join(fixture.root, 'package.json'),
         command,
       })).rejects.toThrow(/environment/)
+    }
+  })
+
+  it('fails closed before launch when fixed resolver policy files are changed', async () => {
+    const fixture = await repoFixture('success')
+    const command = prepareCanaryRequest({ ...snapshot(), baseSha: fixture.baseSha }, policy()).validationCommands[0]!
+    const workspace = await createValidationWorkspace({
+      sourceRepoRoot: fixture.root,
+      baseSha: fixture.baseSha,
+      changedPaths: [],
+      candidateDiff: '',
+      maxFileBytes: 20_000,
+    })
+    try {
+      await writeFile(workspace.resolverHostsPath, '127.0.0.1 attacker.invalid\n')
+      await expect(buildValidationSandboxInvocation({
+        workspaceRoot: workspace.repoRoot,
+        dependencyRoot: workspace.dependencyRoot,
+        resolverHostsPath: workspace.resolverHostsPath,
+        resolverNsswitchPath: workspace.resolverNsswitchPath,
+        command,
+      })).rejects.toThrow('fixed loopback policy')
+    } finally {
+      await cleanupValidationWorkspace(workspace)
     }
   })
 
@@ -490,6 +533,8 @@ describe('fail-closed deterministic validation sandbox', () => {
       workspaceParentDir: parent,
     })
     expect(runner.viteTemporaryWorkspaces).toHaveLength(1)
+    const preflightInvocation = runner.invocations[0]!
+    expect(preflightInvocation.args.some(value => value.includes("lookup('localhost', { all: true })"))).toBe(true)
     expect(runner.viteTemporaryWorkspaces[0]).not.toBe(await realpath(fixture.root))
     expect((await readdir(join(fixture.root, 'packages/core'))).some(name => name.includes('.timestamp-'))).toBe(false)
     expect(await readdir(parent)).toEqual([])
