@@ -89,6 +89,22 @@ describe('GitHub event to deterministic ControlPlaneRequest', () => {
       && error.code === 'ISSUE_MARKDOWN_INVALID')
   })
 
+  it('routes repository production policy rejection to maintainer intervention', async () => {
+    const github = new FakeGitHub()
+    github.issue.body = ISSUE_BODY.replaceAll(
+      'packages/create-oma-app/tests/runtime.test.ts',
+      'packages/otel/package.json',
+    )
+    const event = labelEvent({ issue: { ...labelEvent().issue, body: github.issue.body } })
+    await expect(build(github, event)).rejects.toSatisfy((error: unknown) =>
+      error instanceof ControlPlaneBuildError
+      && error.publicStatus === 'NEEDS_HUMAN'
+      && error.code === 'TARGET_POLICY_REJECTED'
+      && error.reasons.join(' ').includes('blocked by repository production policy')
+      && error.reasons.join(' ').includes('model was not run')
+      && error.reasons.join(' ').includes('reauthorize'))
+  })
+
   it('does not interpret executable text embedded in the Issue body', async () => {
     const github = new FakeGitHub()
     const injected = ISSUE_BODY.replace(

@@ -13,6 +13,7 @@
     "packages/core/src",
     "packages/core/tests",
     "packages/core/examples",
+    "packages/otel/README.md",
     "packages/otel/src",
     "packages/otel/tests",
     "packages/create-oma-app/src",
