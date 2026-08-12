@@ -94,6 +94,14 @@ export const safeEventSchema = z.object({
   subtype: z.string().max(100).nullable(),
 })
 
+export const turnCountDiagnosticSchema = z.object({
+  resultEventSeen: z.boolean(),
+  fieldPresent: z.boolean(),
+  jsonType: z.enum(['number', 'string', 'boolean', 'object', 'array', 'null', 'not_applicable']),
+  numericClass: z.enum(['within_limit', 'max_plus_one', 'above_max_plus_one', 'not_applicable']),
+  configuredMaxTurns: z.number().int().positive().max(50),
+})
+
 const artifactBase = z.object({
   schemaVersion: z.literal(1),
   contract: z.literal('oma-maintainer-harness-artifact-v1'),
@@ -144,6 +152,12 @@ export const failedCanaryArtifactSchema = artifactBase.extend({
     'TIMEOUT',
     'OUTPUT_LIMIT',
     'MALFORMED_OUTPUT',
+    'TURN_COUNT_MISSING',
+    'TURN_COUNT_TYPE_INVALID',
+    'TURN_COUNT_NON_INTEGER',
+    'TURN_COUNT_NEGATIVE',
+    'TURN_COUNT_LIMIT_EXCEEDED',
+    'TURN_LIMIT_REACHED',
     'SCOPE_VIOLATION',
     'VALIDATION_FAILED',
     'VALIDATION_SANDBOX_UNAVAILABLE',
@@ -155,6 +169,7 @@ export const failedCanaryArtifactSchema = artifactBase.extend({
     'INTERNAL_ERROR',
   ]),
   message: z.string().min(1).max(500),
+  turnCountDiagnostic: turnCountDiagnosticSchema.optional(),
 })
 
 export const canaryArtifactSchema = z.discriminatedUnion('status', [
@@ -165,3 +180,4 @@ export const canaryArtifactSchema = z.discriminatedUnion('status', [
 export type CanaryArtifact = z.infer<typeof canaryArtifactSchema>
 export type FailedCanaryArtifact = z.infer<typeof failedCanaryArtifactSchema>
 export type SafeEvent = z.infer<typeof safeEventSchema>
+export type TurnCountDiagnostic = z.infer<typeof turnCountDiagnosticSchema>

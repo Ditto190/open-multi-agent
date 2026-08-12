@@ -37,6 +37,7 @@ import {
   type CanaryRequest,
   type FailedCanaryArtifact,
   type SafeEvent,
+  type TurnCountDiagnostic,
 } from './schema.js'
 
 interface HarnessSummary {
@@ -54,6 +55,7 @@ class CanaryFailure extends Error {
     readonly stage: FailureStage,
     readonly reasonCode: FailureReasonCode,
     message: string,
+    readonly turnCountDiagnostic?: TurnCountDiagnostic,
   ) {
     super(message)
     this.name = 'CanaryFailure'
@@ -74,9 +76,21 @@ const SAFE_EVENT_SUBTYPES = new Set([
   'init',
   'success',
   'error',
+  'error_max_turns',
   'compact_boundary',
   'hook_response',
 ])
+
+class HarnessOutputFailure extends Error {
+  constructor(
+    readonly reasonCode: FailureReasonCode,
+    message: string,
+    readonly turnCountDiagnostic?: TurnCountDiagnostic,
+  ) {
+    super(message)
+    this.name = 'HarnessOutputFailure'
+  }
+}
 
 export interface RunHarnessCanaryOptions {
   readonly repoRoot: string
@@ -550,6 +564,10 @@ async function spawnHarness(options: {
         settled = true
         resolvePromise(parsed)
       } catch (error) {
+        if (error instanceof HarnessOutputFailure) {
+          finishReject(new CanaryFailure('harness_output', error.reasonCode, error.message, error.turnCountDiagnostic))
+          return
+        }
         finishReject(asFailure('harness_output', 'MALFORMED_OUTPUT', error))
       }
     })
@@ -582,11 +600,84 @@ export function parseHarnessStream(value: string, maxTurns: number): HarnessSumm
     }
   }
   if (result === undefined) throw new Error('Claude Code returned no terminal result event.')
+  const turnCountDiagnostic = classifyTurnCount(result, maxTurns)
+  if (result['subtype'] === 'error_max_turns') {
+    throw new HarnessOutputFailure(
+      'TURN_LIMIT_REACHED',
+      'Claude Code reached the configured maximum turn limit.',
+      turnCountDiagnostic,
+    )
+  }
   if (result['subtype'] !== 'success' || result['is_error'] === true) throw new Error('Claude Code terminal result was not successful.')
-  const turns = typeof result['num_turns'] === 'number' ? result['num_turns'] : -1
-  if (!Number.isInteger(turns) || turns < 0 || turns > maxTurns) throw new Error('Claude Code reported an invalid turn count.')
+  if (!turnCountDiagnostic.fieldPresent) {
+    throw new HarnessOutputFailure(
+      'TURN_COUNT_MISSING',
+      'Claude Code terminal result omitted num_turns.',
+      turnCountDiagnostic,
+    )
+  }
+  if (turnCountDiagnostic.jsonType !== 'number') {
+    throw new HarnessOutputFailure(
+      'TURN_COUNT_TYPE_INVALID',
+      'Claude Code terminal result num_turns was not a JSON number.',
+      turnCountDiagnostic,
+    )
+  }
+  const turns = result['num_turns'] as number
+  if (!Number.isSafeInteger(turns)) {
+    throw new HarnessOutputFailure(
+      'TURN_COUNT_NON_INTEGER',
+      'Claude Code terminal result num_turns was not a finite safe integer.',
+      turnCountDiagnostic,
+    )
+  }
+  if (turns < 0) {
+    throw new HarnessOutputFailure(
+      'TURN_COUNT_NEGATIVE',
+      'Claude Code terminal result num_turns was negative.',
+      turnCountDiagnostic,
+    )
+  }
+  if (turns > maxTurns) {
+    throw new HarnessOutputFailure(
+      'TURN_COUNT_LIMIT_EXCEEDED',
+      'Claude Code terminal result num_turns exceeded the configured limit.',
+      turnCountDiagnostic,
+    )
+  }
   const events = safeEvents.map(event => `${JSON.stringify(event)}\n`).join('')
   return { events, safeEvents, turns, terminationReason: 'success' }
+}
+
+function classifyTurnCount(result: Record<string, unknown>, maxTurns: number): TurnCountDiagnostic {
+  const fieldPresent = Object.prototype.hasOwnProperty.call(result, 'num_turns')
+  const value = result['num_turns']
+  const valueType = typeof value
+  const jsonType: TurnCountDiagnostic['jsonType'] = !fieldPresent
+    ? 'not_applicable'
+    : value === null
+      ? 'null'
+      : Array.isArray(value)
+        ? 'array'
+        : valueType === 'number' || valueType === 'string' || valueType === 'boolean'
+          ? valueType
+          : valueType === 'object'
+            ? 'object'
+            : 'not_applicable'
+  const numericClass = typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value <= maxTurns
+      ? 'within_limit'
+      : value === maxTurns + 1
+        ? 'max_plus_one'
+        : 'above_max_plus_one'
+    : 'not_applicable'
+  return {
+    resultEventSeen: true,
+    fieldPresent,
+    jsonType,
+    numericClass,
+    configuredMaxTurns: maxTurns,
+  }
 }
 
 function parseAndValidateStatus(value: string, request: CanaryRequest, policy: CanaryPolicy): string[] {
@@ -725,6 +816,9 @@ function buildFailureArtifact(options: {
     stage: options.failure.stage,
     reasonCode: options.failure.reasonCode,
     message: sanitizeFailureMessage(options.failure.message, options.secret, [options.repoRoot, options.artifactDir]),
+    ...(options.failure.turnCountDiagnostic === undefined
+      ? {}
+      : { turnCountDiagnostic: options.failure.turnCountDiagnostic }),
     eventsHash: sha256(events),
     safeEvents,
     validationResults: sanitizeValidationResults(options.validationResults, options.secret),

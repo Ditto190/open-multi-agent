@@ -726,6 +726,91 @@ describe('machine-readable fail-closed artifacts', () => {
     await expectFailedArtifact(fixture, 'ARTIFACT_CONTAMINATION')
     expect(await readdir(fixture.artifactDir)).toEqual(['result.json'])
   })
+
+  it.each([
+    ['zero turns', 0],
+    ['configured maximum turns', 20],
+  ])('accepts a fake CLI success result with %s', async (_label, numTurns) => {
+    const fixture = await repoFixture('success', [
+      { type: 'system', subtype: 'init' },
+      { type: 'result', subtype: 'success', is_error: false, num_turns: numTurns },
+    ])
+    const artifact = await runFixture(fixture)
+    expect(artifact.status).toBe('SUCCEEDED')
+    expect(artifact.turns).toBe(numTurns)
+    expect(verifyArtifactHash(artifact)).toBe(true)
+  })
+
+  it.each([
+    ['missing', { type: 'result', subtype: 'success', is_error: false }, 'TURN_COUNT_MISSING', {
+      fieldPresent: false, jsonType: 'not_applicable', numericClass: 'not_applicable',
+    }],
+    ['string', { type: 'result', subtype: 'success', is_error: false, num_turns: '20' }, 'TURN_COUNT_TYPE_INVALID', {
+      fieldPresent: true, jsonType: 'string', numericClass: 'not_applicable',
+    }],
+    ['null', { type: 'result', subtype: 'success', is_error: false, num_turns: null }, 'TURN_COUNT_TYPE_INVALID', {
+      fieldPresent: true, jsonType: 'null', numericClass: 'not_applicable',
+    }],
+    ['fractional', { type: 'result', subtype: 'success', is_error: false, num_turns: 20.5 }, 'TURN_COUNT_NON_INTEGER', {
+      fieldPresent: true, jsonType: 'number', numericClass: 'not_applicable',
+    }],
+    ['unsafe integer', { type: 'result', subtype: 'success', is_error: false, num_turns: Number.MAX_SAFE_INTEGER + 1 }, 'TURN_COUNT_NON_INTEGER', {
+      fieldPresent: true, jsonType: 'number', numericClass: 'not_applicable',
+    }],
+    ['negative', { type: 'result', subtype: 'success', is_error: false, num_turns: -1 }, 'TURN_COUNT_NEGATIVE', {
+      fieldPresent: true, jsonType: 'number', numericClass: 'not_applicable',
+    }],
+    ['max plus one', { type: 'result', subtype: 'success', is_error: false, num_turns: 21 }, 'TURN_COUNT_LIMIT_EXCEEDED', {
+      fieldPresent: true, jsonType: 'number', numericClass: 'max_plus_one',
+    }],
+    ['above max plus one', { type: 'result', subtype: 'success', is_error: false, num_turns: 100 }, 'TURN_COUNT_LIMIT_EXCEEDED', {
+      fieldPresent: true, jsonType: 'number', numericClass: 'above_max_plus_one',
+    }],
+    ['terminal max-turn error', { type: 'result', subtype: 'error_max_turns', is_error: true, num_turns: 21 }, 'TURN_LIMIT_REACHED', {
+      fieldPresent: true, jsonType: 'number', numericClass: 'max_plus_one',
+    }],
+  ] as const)('classifies fake CLI %s turn-count output without retaining the value', async (_label, terminalEvent, reasonCode, diagnostic) => {
+    const fixture = await repoFixture('success', [terminalEvent])
+    await expect(runFixture(fixture)).rejects.toThrow(reasonCode)
+    const artifact = await expectFailedArtifact(fixture, reasonCode)
+    expect(artifact.turnCountDiagnostic).toEqual({
+      resultEventSeen: true,
+      ...diagnostic,
+      configuredMaxTurns: 20,
+    })
+    expect(artifact.turns).toBeNull()
+    expect(await readdir(fixture.artifactDir)).toEqual(['result.json'])
+    expect(JSON.stringify(artifact)).not.toContain('"num_turns"')
+    expect(verifyArtifactHash({
+      ...artifact,
+      turnCountDiagnostic: { ...artifact.turnCountDiagnostic!, configuredMaxTurns: 19 },
+    })).toBe(false)
+  })
+
+  it('keeps multiple terminal results malformed and retains no terminal payload', async () => {
+    const fixture = await repoFixture('success', [
+      { type: 'result', subtype: 'success', is_error: false, num_turns: 1 },
+      { type: 'result', subtype: 'success', is_error: false, num_turns: 2 },
+    ])
+    await expect(runFixture(fixture)).rejects.toThrow('MALFORMED_OUTPUT')
+    const artifact = await expectFailedArtifact(fixture, 'MALFORMED_OUTPUT')
+    expect(artifact).not.toHaveProperty('turnCountDiagnostic')
+    expect(JSON.stringify(artifact)).not.toContain('num_turns')
+  })
+
+  it('drops unknown Secret-shaped event fields from a parser failure artifact', async () => {
+    const unsafeValue = 'Secret-do-not-retain-this-value'
+    const fixture = await repoFixture('success', [
+      { type: 'future_event', subtype: 'future_subtype', Secret: unsafeValue },
+      { type: 'result', subtype: 'success', is_error: false },
+    ])
+    await expect(runFixture(fixture)).rejects.toThrow('TURN_COUNT_MISSING')
+    const artifact = await expectFailedArtifact(fixture, 'TURN_COUNT_MISSING')
+    const serialized = await readFile(join(fixture.artifactDir, 'result.json'), 'utf8')
+    expect(serialized).not.toContain(unsafeValue)
+    expect(serialized).not.toContain('future_subtype')
+    expect(verifyArtifactHash(artifact)).toBe(true)
+  })
 })
 
 describe('canonical validation policy binding', () => {
@@ -829,6 +914,9 @@ describe('Issue #491 mock success path and artifact integrity', () => {
     expect(capture.scrub).toBe('1')
     expect(capture.argv.join(' ')).not.toContain(INJECTION)
     expect(capture.argv).toContain('--settings')
+    const maxTurnsIndex = capture.argv.indexOf('--max-turns')
+    expect(maxTurnsIndex).toBeGreaterThanOrEqual(0)
+    expect(capture.argv[maxTurnsIndex + 1]).toBe('20')
     expect(capture.argv).not.toContain('Bash(rg *)')
     expect(JSON.stringify(capture.settings)).not.toContain(FAKE_KEY)
     expect(await fileExists(join(fixture.root, 'SHOULD_NOT_EXIST'))).toBe(false)
@@ -859,7 +947,7 @@ describe('Issue #491 mock success path and artifact integrity', () => {
   })
 })
 
-async function repoFixture(mode: string) {
+async function repoFixture(mode: string, terminalEvents?: readonly Record<string, unknown>[]) {
   const root = await mkdtemp(join(tmpdir(), 'oma-harness-test-'))
   const artifactDir = await mkdtemp(join(tmpdir(), 'oma-harness-artifact-'))
   const harnessDir = await mkdtemp(join(tmpdir(), 'oma-harness-cli-'))
@@ -910,9 +998,12 @@ if (process.argv.some(value => value.includes(${JSON.stringify(INJECTION)}))) pr
 if (process.env.GITHUB_TOKEN || process.env.ACTIONS_RUNTIME_TOKEN || process.env.NPM_TOKEN || process.env.SSH_AUTH_SOCK) process.exit(7)
 ${operations[mode] ?? operations.success}
 if (${JSON.stringify(mode)} !== 'malformed' && ${JSON.stringify(mode)} !== 'nonzero' && ${JSON.stringify(mode)} !== 'timeout') {
-  process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init' }) + '\\n')
-  process.stdout.write(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'must not persist' }] } }) + '\\n')
-  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 4, result: 'done' }) + '\\n')
+  const terminalEvents = ${JSON.stringify(terminalEvents ?? [
+    { type: 'system', subtype: 'init' },
+    { type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'must not persist' }] } },
+    { type: 'result', subtype: 'success', is_error: false, num_turns: 4, result: 'done' },
+  ])}
+  for (const event of terminalEvents) process.stdout.write(JSON.stringify(event) + '\\n')
 }
 `)
   return { root, artifactDir, harnessDir, baseSha, harnessScript, capturePath, attackSource: '' }
