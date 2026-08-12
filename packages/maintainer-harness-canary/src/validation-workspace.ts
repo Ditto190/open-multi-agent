@@ -11,11 +11,16 @@ export interface ValidationWorkspace {
   readonly containerRoot: string
   readonly repoRoot: string
   readonly dependencyRoot: string
+  readonly resolverHostsPath: string
+  readonly resolverNsswitchPath: string
   readonly baseSha: string
   readonly changedPaths: readonly string[]
   readonly candidateDiff: string
   readonly manifest: readonly WorkspaceManifestEntry[]
 }
+
+export const VALIDATION_HOSTS = '127.0.0.1 localhost\n'
+export const VALIDATION_NSSWITCH = 'hosts: files\n'
 
 interface WorkspaceManifestEntry {
   readonly path: string
@@ -38,10 +43,16 @@ export async function createValidationWorkspace(options: {
   const containerRoot = await mkdtemp(join(parentDir, 'oma-validation-workspace-'))
   const repoRoot = join(containerRoot, 'repo')
   const patchPath = join(containerRoot, 'candidate.patch')
+  const resolverRoot = join(containerRoot, 'etc')
+  const resolverHostsPath = join(resolverRoot, 'hosts')
+  const resolverNsswitchPath = join(resolverRoot, 'nsswitch.conf')
   const commandRunner = new NodeCommandRunner()
   const gitEnvironment = validationGitEnvironment(containerRoot)
   try {
     await mkdir(join(containerRoot, 'home'), { mode: 0o700 })
+    await mkdir(resolverRoot, { mode: 0o700 })
+    await writeFile(resolverHostsPath, VALIDATION_HOSTS, { mode: 0o600 })
+    await writeFile(resolverNsswitchPath, VALIDATION_NSSWITCH, { mode: 0o600 })
     await commandRunner.run('git', [
       'clone', '--quiet', '--no-hardlinks', '--no-checkout', '--', sourceRepoRoot, repoRoot,
     ], { env: gitEnvironment })
@@ -63,6 +74,8 @@ export async function createValidationWorkspace(options: {
       containerRoot,
       repoRoot,
       dependencyRoot,
+      resolverHostsPath,
+      resolverNsswitchPath,
       baseSha: options.baseSha,
       changedPaths: [...options.changedPaths].sort(),
       candidateDiff: options.candidateDiff,
@@ -82,6 +95,7 @@ export async function assertValidationWorkspaceIntegrity(
 ): Promise<void> {
   const commandRunner = new NodeCommandRunner()
   const gitEnvironment = validationGitEnvironment(workspace.containerRoot)
+  await assertResolverIntegrity(workspace)
   await assertHead(commandRunner, workspace.repoRoot, gitEnvironment, workspace.baseSha)
   const status = await commandRunner.run('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
     cwd: workspace.repoRoot,
@@ -111,6 +125,21 @@ export async function assertValidationWorkspaceIntegrity(
   const manifest = await buildWorkspaceManifest(workspace.repoRoot)
   if (canonicalJson(manifest) !== canonicalJson(workspace.manifest)) {
     throw new Error('Validation left filesystem changes in the disposable workspace.')
+  }
+}
+
+async function assertResolverIntegrity(workspace: ValidationWorkspace): Promise<void> {
+  for (const [path, expected] of [
+    [workspace.resolverHostsPath, VALIDATION_HOSTS],
+    [workspace.resolverNsswitchPath, VALIDATION_NSSWITCH],
+  ] as const) {
+    const info = await lstat(path)
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new Error('Validation resolver configuration must be a regular file.')
+    }
+    if (await readFile(path, 'utf8') !== expected) {
+      throw new Error('Validation resolver configuration changed.')
+    }
   }
 }
 

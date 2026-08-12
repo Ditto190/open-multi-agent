@@ -208,6 +208,8 @@ export async function runHarnessCanary(options: RunHarnessCanaryOptions): Promis
         commands: request.validationCommands,
         workspaceRoot: validationWorkspace.repoRoot,
         dependencyRoot: validationWorkspace.dependencyRoot,
+        resolverHostsPath: validationWorkspace.resolverHostsPath,
+        resolverNsswitchPath: validationWorkspace.resolverNsswitchPath,
         maxOutputBytes: policy.limits.maxValidationOutputBytes,
         sandboxProcessRunner: options.validationSandboxProcessRunner,
       })
@@ -613,6 +615,8 @@ async function runValidations(options: {
   readonly commands: readonly ValidationCommand[]
   readonly workspaceRoot: string
   readonly dependencyRoot: string
+  readonly resolverHostsPath: string
+  readonly resolverNsswitchPath: string
   readonly maxOutputBytes: number
   readonly sandboxProcessRunner?: SandboxProcessRunner
 }) {
@@ -623,6 +627,8 @@ async function runValidations(options: {
     const result = await runValidationInSandbox({
       workspaceRoot: options.workspaceRoot,
       dependencyRoot: options.dependencyRoot,
+      resolverHostsPath: options.resolverHostsPath,
+      resolverNsswitchPath: options.resolverNsswitchPath,
       command,
       maxOutputBytes: options.maxOutputBytes,
       runner: options.sandboxProcessRunner,

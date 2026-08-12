@@ -55,15 +55,22 @@ profile bwrap /usr/bin/bwrap flags=(unconfined) {
       "'--proc', '/proc'",
       "'--tmpfs', '/tmp'",
       "'--tmpfs', '/home'",
+      "'--dir', '/etc'",
+      "'--ro-bind', resolverHostsPath, '/etc/hosts'",
+      "'--ro-bind', resolverNsswitchPath, '/etc/nsswitch.conf'",
       "'--bind', workspaceRoot, SANDBOX_REPO_ROOT",
       "'--ro-bind', gitMetadataRoot, `${SANDBOX_REPO_ROOT}/.git`",
       "'--ro-bind', dependencyRoot, `${SANDBOX_REPO_ROOT}/node_modules`",
       "'--clearenv'",
     ]) expect(validationSandbox).toContain(contract)
+    expect(validationSandbox).toContain("lookup('localhost', { all: true })")
+    expect(validationSandbox).not.toContain("'/etc/resolv.conf'")
     expect(validationSandbox).not.toContain("'--bind', repoRoot, SANDBOX_REPO_ROOT")
     expect(validationWorkspace).toContain("'clone', '--quiet', '--no-hardlinks', '--no-checkout'")
     expect(validationWorkspace).toContain("'remote', 'remove', 'origin'")
     expect(validationWorkspace).toContain("'apply', '--binary', '--whitespace=nowarn'")
+    expect(validationWorkspace).toContain("export const VALIDATION_HOSTS = '127.0.0.1 localhost\\n'")
+    expect(validationWorkspace).toContain("export const VALIDATION_NSSWITCH = 'hosts: files\\n'")
     expect(validationWorkspace).toContain('cleanupValidationWorkspace')
     expect(validationSandbox).not.toContain("new NodeCommandRunner()).run(options.command.command")
     expect(validationSandbox).toContain('new BoundedProcessRunner()')
