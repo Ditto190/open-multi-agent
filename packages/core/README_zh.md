@@ -1,25 +1,22 @@
-<br />
-
-<p align="center">
+<h1 align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/logo-mark-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/logo-mark-light.svg">
-    <img alt="Open Multi-Agent" src="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/logo-mark-light.svg" width="96">
+    <img alt="" src="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/logo-mark-light.svg" width="72">
   </picture>
-</p>
-
-<br />
-
-<h1 align="center">Open Multi-Agent</h1>
+  <br>Open Multi-Agent
+</h1>
 
 <p align="center">
   <strong>只描述目标，不画任务图。</strong><br/>
-  运行在你自己环境中的多智能体编排。
+  多智能体自主分工协作，在自有环境中运行：关键操作经审批放行，每次运行留有可核验记录。
 </p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@open-multi-agent/core"><img src="https://img.shields.io/npm/v/@open-multi-agent/core" alt="npm version"></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/node/v/@open-multi-agent/core" alt="Node.js version"></a>
   <a href="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/ci.yml"><img src="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/supply-chain-audit.yml"><img src="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/supply-chain-audit.yml/badge.svg" alt="Supply chain audit"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
   <a href="https://codecov.io/gh/open-multi-agent/open-multi-agent"><img src="https://codecov.io/gh/open-multi-agent/open-multi-agent/graph/badge.svg" alt="codecov"></a>
 </p>
@@ -166,7 +163,7 @@ Agent 可声明 `description`、`capabilities`、`costTier` 与 `latencyClass`�
 | **评测** | 对 EvalSet 做版本管理，运行参考 scorer，用离线报告把关 CI，持久化结果，或尽力而为地抽样生产运行。 |
 | **记忆与恢复** | 共享记忆可插拔；checkpoint 可在不重复已完成任务的前提下恢复运行。 |
 | **可观测性** | 无需托管服务即可使用稳定运行标识、trace、执行回执、脱敏、TraceStore 和离线 DAG/Waterfall Viewer。 |
-| **外部 Agent** | ACP 和进程后端让编码 CLI 加入团队，OMA 继续管理调度、记忆和预算。 |
+| **外部 Agent** | ACP 和进程后端让编码 CLI 加入团队，OMA 继续管理调度、记忆和预算；逐次工具 gate、文件沙箱与 LLM 出网策略不覆盖这类外部后端。 |
 
 ## 架构
 
@@ -217,7 +214,7 @@ Coordinator -> 任务 DAG -> Scheduler -> AgentPool
 
 可选集成只在使用时加载：core 直接安装的只有 `@anthropic-ai/sdk`、`openai` 和 `zod`，其余 SDK 都是按需懒加载的可选 peer，OpenTelemetry 完全归属 `@open-multi-agent/otel`。依赖变更按实际价值与安全、体积、维护、兼容成本权衡，不设固定数量上限。
 
-凭证、模型、AI SDK 桥接、推理设置、MCP、本地端点配置，以及出网管控的确切生效边界，见 [Provider](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md)、[框架级 LLM 出网策略](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/egress-policy.md)和[工具配置](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md)。
+凭证、模型、AI SDK 桥接、推理设置、MCP、本地端点配置、自托管部署，以及出网管控的确切生效边界，见 [Provider](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md)、[框架级 LLM 出网策略](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/egress-policy.md)、[自托管与数据驻留](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/self-hosting.md)和[工具配置](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md)。
 
 **Provider 赞助商**
 
@@ -233,7 +230,7 @@ Coordinator -> 任务 DAG -> Scheduler -> AgentPool
 | 控制成本 | `maxTokenBudget`；`maxCostBudget` + 应用自有 `estimateCost` |
 | 限制工具 | `tools` / `toolPreset`、`cwd` / `defaultCwd`、工具输出上限 |
 | 故障恢复 | 任务重试、checkpoint、`restore()` 与可选的自适应计划修复 |
-| 人工把关 | `planOnly`、同步审批回调或[持久化审批 gate](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md) |
+| 人工把关 | `planOnly`、同步审批回调或[持久化审批 gate](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md)；审批界面与传递通道由应用自行实现 |
 | 统一观测 | Trace sink、TraceStore、执行回执、Run Viewer，或可选 OTel adapter |
 
 预算检查发生在 turn 和任务边界，因此单次运行最多可能超出一个模型 turn，不是分厘精确的截停。`estimateCost` 收到每次调用的 token 用量，以及 agent、生效的 `model`、`provider`、阶段和 `taskId`；价格表由应用自己维护。
@@ -250,7 +247,7 @@ Core 已提供运行标识、trace sink、执行回执、可查询的内存/文�
 
 ### 运行事件日志
 
-长时间运行出问题时，最缺的记录往往是每个 Agent 在被调用那一刻究竟看到了什么。可选的运行事件日志会把这部分保留下来：每条消息和工具结果都作为追加事件写入，上下文策略替换掉若干轮次后放进去的那个块也原样保存，运行结束后可以直接读回，而不必靠推测还原。`verifyRun()` 随后离线校验模型看到的每个块都能从日志中复现，而不是采信日志对自身的陈述；`restore()` 也可以从最后一条追加事件恢复，而不再局限于最后一次快照。该能力默认关闭，关闭时没有额外开销，详见[运行事件日志指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/run-journal.md)。
+长时间运行出问题时，最缺的记录往往是每个 Agent 在被调用那一刻究竟看到了什么。可选的运行事件日志会把这部分保留下来：每条消息和工具结果都作为追加事件写入，上下文策略替换掉若干轮次后放进去的那个块也原样保存，运行结束后可以直接读回，而不必靠推测还原。`verifyRun()` 随后离线校验模型看到的每个块都能从日志中复现，而不是采信日志对自身的陈述，该校验确认的是执行顺序与血缘，并不使日志具备防篡改能力；`restore()` 也可以从最后一条追加事件恢复，而不再局限于最后一次快照。该能力默认关闭，关闭时没有额外开销，详见[运行事件日志指南](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/run-journal.md)。
 
 ## 文档
 

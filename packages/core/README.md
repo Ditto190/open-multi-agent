@@ -1,25 +1,22 @@
-<br />
-
-<p align="center">
+<h1 align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/logo-mark-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/logo-mark-light.svg">
-    <img alt="Open Multi-Agent" src="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/logo-mark-light.svg" width="96">
+    <img alt="" src="https://raw.githubusercontent.com/open-multi-agent/open-multi-agent/main/.github/brand/logo-mark-light.svg" width="72">
   </picture>
-</p>
-
-<br />
-
-<h1 align="center">Open Multi-Agent</h1>
+  <br>Open Multi-Agent
+</h1>
 
 <p align="center">
   <strong>Describe the goal, not the graph.</strong><br/>
-  Multi-agent orchestration that runs in your own environment.
+  A self-organizing team of agents that runs in your environment, pauses for approval on consequential actions, and leaves a verifiable record of every run.
 </p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@open-multi-agent/core"><img src="https://img.shields.io/npm/v/@open-multi-agent/core" alt="npm version"></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/node/v/@open-multi-agent/core" alt="Node.js version"></a>
   <a href="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/ci.yml"><img src="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/supply-chain-audit.yml"><img src="https://github.com/open-multi-agent/open-multi-agent/actions/workflows/supply-chain-audit.yml/badge.svg" alt="Supply chain audit"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
   <a href="https://codecov.io/gh/open-multi-agent/open-multi-agent"><img src="https://codecov.io/gh/open-multi-agent/open-multi-agent/graph/badge.svg" alt="codecov"></a>
 </p>
@@ -171,7 +168,7 @@ Agents may declare `description`, `capabilities`, `costTier`, and `latencyClass`
 | **Evaluation** | Version EvalSets, run reference scorers, gate CI with offline reports, persist results, or sample production runs on a best-effort path. |
 | **Memory and recovery** | Shared memory is pluggable; checkpoints resume interrupted runs without repeating completed tasks. |
 | **Observability** | Stable run identity, traces, execution receipts, redaction, TraceStore, and the offline DAG/Waterfall Viewer are available without a hosted service. |
-| **External agents** | ACP and process backends let coding CLIs participate while OMA keeps scheduling, memory, and budgets. |
+| **External agents** | ACP and process backends let coding CLIs participate while OMA keeps scheduling, memory, and budgets; the per-call tool gate, filesystem sandbox, and LLM egress policy do not cover them. |
 
 ## Architecture
 
@@ -222,7 +219,7 @@ Change `provider`, `model`, and credentials; the agent shape stays the same.
 
 Optional integrations load only when used: core directly installs only `@anthropic-ai/sdk`, `openai`, and `zod`; other SDKs are lazy-loading opt-in peers, and OpenTelemetry lives entirely in `@open-multi-agent/otel`. Dependency changes are weighed on demonstrated value plus security, size, maintenance, and compatibility cost, not a fixed count.
 
-See [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md), [framework-owned LLM egress policy](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/egress-policy.md), and [Tool configuration](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md) for credentials, models, the AI SDK bridge, reasoning settings, MCP, local endpoints, and the exact network-enforcement boundary.
+See [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md), [framework-owned LLM egress policy](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/egress-policy.md), [Self-hosting and data residency](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/self-hosting.md), and [Tool configuration](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md) for credentials, models, the AI SDK bridge, reasoning settings, MCP, local endpoints, self-hosted deployment, and the exact network-enforcement boundary.
 
 **Provider sponsors**
 
@@ -238,7 +235,7 @@ Paid sponsors supporting `open-multi-agent`. Sponsorship does not affect technic
 | Control spend | `maxTokenBudget`; `maxCostBudget` + application-owned `estimateCost` |
 | Limit tools | `tools` / `toolPreset`, `cwd` / `defaultCwd`, tool-output caps |
 | Recover | Task retries, checkpointing, `restore()`, and opt-in adaptive plan repair |
-| Review work | `planOnly`, inline approval callbacks, or [durable approval gates](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md) |
+| Review work | `planOnly`, inline approval callbacks, or [durable approval gates](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/durable-approvals.md); your application owns the approval surface and transport |
 | Observe | Trace sinks, TraceStore, execution receipts, Run Viewer, or the optional OTel adapter |
 
 Budget checks run at turn and task boundaries, so a run can overshoot by up to one model turn; they are not a cent-exact stop. `estimateCost` receives each call's token usage plus the agent, effective `model`, `provider`, phase, and `taskId`, and your application owns the price table.
@@ -265,7 +262,7 @@ See the [observability guide](https://github.com/open-multi-agent/open-multi-age
 
 ### Run journal
 
-When a long run goes wrong, the record usually missing is what each agent actually saw at the moment it was asked. The opt-in run journal keeps it: every message and tool result as an appended event, plus the exact block a context strategy put in place of the turns it dropped, so a finished run can be read back instead of reconstructed by guesswork. `verifyRun()` then checks offline that every block the model saw is reproducible from the log rather than trusting the log's own account of itself, and `restore()` can resume from the last appended event instead of the last snapshot. It is off by default, costs nothing when off, and is documented in the [run journal guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/run-journal.md).
+When a long run goes wrong, the record usually missing is what each agent actually saw at the moment it was asked. The opt-in run journal keeps it: every message and tool result as an appended event, plus the exact block a context strategy put in place of the turns it dropped, so a finished run can be read back instead of reconstructed by guesswork. `verifyRun()` then checks offline that every block the model saw is reproducible from the log rather than trusting the log's own account of itself, which establishes order and lineage rather than tamper-evidence, and `restore()` can resume from the last appended event instead of the last snapshot. It is off by default, costs nothing when off, and is documented in the [run journal guide](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/run-journal.md).
 
 ## Documentation
 
