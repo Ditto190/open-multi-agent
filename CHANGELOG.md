@@ -2,34 +2,30 @@
 
 ## Unreleased
 
+## 1.19.0 - 2026-09-11
+
 ### Added
 
-- Added an opt-in authoritative run store. `OrchestratorConfig.runStore` and
-  `RunTasksOptions.runStore` give a logical run a durable lifecycle record, an
-  execution lease, and a monotonically increasing fencing token, so one worker
-  at a time advances a run and a worker that was taken over cannot write after
-  the takeover. Ships the `RunStore` interface, the `MemoryStoreRunStore`
-  adapter over any `MemoryStore` with compare-and-set, and the `RunLedger` /
-  `RunLeaseHandle` surface for reading, cancelling, and resuming a run from
-  outside its worker.
+- Added an opt-in authoritative run store through `OrchestratorConfig.runStore`
+  and `RunTasksOptions.runStore`; it gives a logical run a durable lifecycle
+  record, an execution lease, and a monotonically increasing fencing token so
+  one worker at a time advances the run and a worker that was taken over cannot
+  write after the takeover.
+- Added the `RunStore` interface, the `MemoryStoreRunStore` adapter over any
+  `MemoryStore` with compare-and-set, and the `RunLedger` and `RunLeaseHandle`
+  surface for reading, cancelling, and resuming a run from outside its worker.
 
 ### Changed
 
 - `TeamConfig.maxConcurrency` now bounds the agent pool for that team's runs
   instead of being accepted and ignored. It intersects with
-  `OrchestratorConfig.maxConcurrency` — the smaller of the two wins — so a team
-  can narrow the pool for its own runs but never widen it past the orchestrator
-  ceiling. A team that set a cap below the orchestrator's was previously running
-  at the orchestrator value (the default `5` when unset) and now runs at its
-  own, lower value; raise or remove the team cap to keep the previous
-  throughput. A cap that is not an integer `>= 1` is reported as an
-  `INVALID_TEAM_MAX_CONCURRENCY` warning on `onProgress` and the orchestrator
-  value applies, so a config an earlier release accepted still runs. Teams that
-  leave the field unset, `runAgent()`, and consensus runs are unchanged.
-- LICENSE now names Shenzhen YuanASI Technology Co., Ltd. alongside the
-  open-multi-agent contributors, every package README closes with a maintainer
-  line linking to yuanasi.com, and `author` in the three published package.json
-  files points at YuanASI. The MIT terms are unchanged.
+  `OrchestratorConfig.maxConcurrency`, and the smaller value wins, so a team can
+  narrow its own pool but never widen it past the orchestrator ceiling. A team
+  that set a cap below the orchestrator's was previously running at the
+  orchestrator value and now runs at its own lower value; raise or remove the
+  team cap to keep the previous throughput. A cap that is not an integer of at
+  least 1 is reported as an `INVALID_TEAM_MAX_CONCURRENCY` warning on
+  `onProgress` and the orchestrator value applies.
 - With a run store configured, execution-ownership and run-lifecycle writes fail
   closed instead of following the best-effort semantics of checkpoint and
   telemetry writes: a fenced-out checkpoint write never reaches the store, a
@@ -37,19 +33,55 @@
   lease reports the fence failure rather than success. Runs with no run store
   configured are unchanged.
 - The `oma` CLI default model for `provider: 'deepseek'` is now `deepseek-flash`
-  (DeepSeek-V4.1-Flash), replacing `deepseek-v4-flash`. DeepSeek retired the
-  V4-Flash model and now serves `deepseek-v4-flash` requests from V4.1-Flash, so
-  a CLI run without `--model` is already answered by V4.1; the new default names
-  the model it actually gets rather than a compatibility alias DeepSeek
-  describes as temporary. The old name still resolves, and library users that
-  pass an explicit `model` are unaffected. Provider docs, the adapter JSDoc, the
-  scaffolder env template, and the DeepSeek examples moved to the same name;
-  three `examples/basics` headers that still named the long-retired
-  `deepseek-chat` moved with them.
-- The DeepSeek adapter's JSDoc no longer states that thinking runs at `high`
-  effort. The adapter forwards whatever effort the caller passes and sets none
-  itself, and DeepSeek documents only that thinking is on by default. The
-  correction ships in the published `.d.ts`; runtime behavior is unchanged.
+  (DeepSeek-V4.1-Flash), replacing `deepseek-v4-flash`. The retired name still
+  resolves, and library users that pass an explicit model are unaffected.
+  Provider docs, adapter JSDoc, the scaffolder env template, and the DeepSeek
+  examples moved to the same name.
+- The DeepSeek adapter JSDoc no longer states that thinking runs at high effort.
+  The adapter forwards whatever effort the caller passes and sets none itself;
+  runtime behavior is unchanged.
+- Corrected published JSDoc that misstated runtime behavior, including
+  `onAgentStream` coverage in `runTasks()`, `done` stream-event payloads per
+  layer, retryable-error classification, and the `RedactingStore` example
+  constructor call.
+- The `delegate_to_agent` error returned when the pool has no free slot now
+  points at both ceilings: "Increase maxConcurrency on the orchestrator or the
+  team" rather than the orchestrator alone. Callers that match on that string
+  should update it.
+- The `@open-multi-agent/core` package description on npm was rewritten to lead
+  with running in your own environment, approval gates, and a verifiable record
+  of every run.
+- LICENSE now names Shenzhen YuanASI Technology Co., Ltd. alongside the
+  open-multi-agent contributors, package READMEs close with a maintainer line,
+  and the `author` field in the published package.json files points at YuanASI.
+  The MIT terms are unchanged.
+
+### Compatibility
+
+- Runs that do not configure a run store keep the existing single-process
+  checkpoint and restore behavior. `restore()` is the resume command either way;
+  with a run store it additionally makes a suspended record eligible and takes
+  the lease before reconciling the approval ledger.
+- A team that set `maxConcurrency` below the orchestrator value previously ran
+  at the orchestrator value and now runs at its own lower cap. Raise or remove
+  the team cap, or raise `OrchestratorConfig.maxConcurrency`, to keep the
+  previous parallelism; leave the field unset to keep the old behavior exactly.
+- Non-integer or less-than-1 team caps no longer pass through silently. They
+  emit an `INVALID_TEAM_MAX_CONCURRENCY` warning on `onProgress` and fall back
+  to the orchestrator value. This is a new code on the existing `warning` event;
+  no event type was added.
+- The old `deepseek-v4-flash` name still resolves, and library callers that pass
+  an explicit `model` are unaffected. Cost maps, telemetry filters, or snapshot
+  assertions that key on the model string should be reviewed because the CLI
+  default now sends `deepseek-flash`.
+- No existing export was removed or renamed and every new config field is
+  optional, so existing code keeps compiling and running unchanged unless it
+  opts into the run store or relies on ignored team concurrency caps.
+- The otel package changed only in shipped-file metadata; it has no public API
+  or runtime change.
+- The `.env.example` that create-oma-app scaffolds now names `deepseek-flash`
+  in the commented-out `OMA_MODEL` line of its DeepSeek section; existing
+  generated projects are not rewritten by this release.
 
 ## 1.18.0 - 2026-09-04
 
