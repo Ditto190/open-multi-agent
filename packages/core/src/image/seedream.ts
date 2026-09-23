@@ -10,6 +10,7 @@
 import { ImageModelError } from '../errors.js'
 import type { EgressPolicy } from '../types.js'
 import {
+  assertNoReservedOptions,
   firstBase64Image,
   imageFetch,
   joinUrl,
@@ -25,6 +26,7 @@ import type {
 } from './types.js'
 
 const DEFAULT_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
+const RESERVED_OPTIONS = new Set(['model', 'prompt', 'image', 'response_format'])
 
 /**
  * Ark reports safety rejections with codes such as
@@ -50,7 +52,10 @@ export interface SeedreamImageAdapterOptions {
   readonly watermark?: boolean
   /**
    * Extra body fields sent with every call, for example `seed`. Values are
-   * sent as-is and may override the defaults above.
+   * sent as-is and override `watermark`; a `size` here is a default that
+   * `request.size` overrides. Fields that carry the request itself or the
+   * output format (`model`, `prompt`, `image`, `response_format`) are
+   * rejected at construction.
    */
   readonly providerOptions?: Readonly<Record<string, unknown>>
   /** Restrict outbound requests; see the egress policy docs. */
@@ -74,6 +79,7 @@ export class SeedreamImageAdapter implements ImageModelAdapter {
     this.maxInputImages = options.maxInputImages
     this.watermark = options.watermark ?? false
     this.providerOptions = options.providerOptions ?? {}
+    assertNoReservedOptions(this.provider, this.providerOptions, key => RESERVED_OPTIONS.has(key))
     this.fetchImpl = imageFetch(options.egressPolicy, this.provider)
   }
 
@@ -115,12 +121,12 @@ export class SeedreamImageAdapter implements ImageModelAdapter {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          watermark: this.watermark,
+          ...this.providerOptions,
           model: this.model,
           prompt: request.prompt,
           ...(image !== undefined ? { image } : {}),
           ...(request.size !== undefined ? { size: request.size } : {}),
-          watermark: this.watermark,
-          ...this.providerOptions,
           response_format: 'b64_json',
         }),
       },
@@ -153,11 +159,11 @@ export class SeedreamImageAdapter implements ImageModelAdapter {
       ? (body as Record<string, unknown>)['usage']
       : undefined
     const params: Record<string, unknown> = {
-      model: this.model,
-      size: request.size,
-      inputImages: images.length,
       watermark: this.watermark,
       ...this.providerOptions,
+      model: this.model,
+      ...(request.size !== undefined ? { size: request.size } : {}),
+      inputImages: images.length,
     }
     return {
       data,

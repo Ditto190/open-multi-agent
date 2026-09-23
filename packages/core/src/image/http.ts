@@ -21,6 +21,24 @@ export function imageFetch(egressPolicy: EgressPolicy | undefined, provider: str
     : createEgressFetch(egressPolicy, provider, lateFetch)
 }
 
+/**
+ * Reject `providerOptions` keys the adapter sets from the request or its own
+ * options. Letting them through would let a stray option replace the prompt or
+ * the input images without any error, so the conflict fails at construction.
+ */
+export function assertNoReservedOptions(
+  provider: string,
+  providerOptions: Readonly<Record<string, unknown>>,
+  isReserved: (key: string) => boolean,
+): void {
+  const clashes = Object.keys(providerOptions).filter(isReserved)
+  if (clashes.length > 0) {
+    throw new TypeError(
+      `${provider} providerOptions cannot set ${clashes.join(', ')}; the adapter sets ${clashes.length === 1 ? 'it' : 'them'} from the request or its own options`,
+    )
+  }
+}
+
 /** Join a base URL and a path without doubling or dropping the slash. */
 export function joinUrl(baseURL: string, path: string): string {
   return `${baseURL.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`
@@ -51,12 +69,17 @@ function truncate(value: string): string {
   return value.length > MAX_DETAIL_CHARS ? `${value.slice(0, MAX_DETAIL_CHARS)}…` : value
 }
 
-/** The `{ error: { code, message } }` shape both built-in providers use. */
+/** Fields read from the `{ error: { code, type, message } }` shape the built-in providers use. */
 export interface ProviderErrorBody {
   readonly code?: string
   readonly type?: string
   readonly message?: string
+  /** The whole `error` object (or body), for provider rules that need more fields. */
+  readonly error?: Readonly<Record<string, unknown>>
 }
+
+/** An adapter's own rule for recognizing a safety rejection. */
+export type ContentPolicyRule = (body: ProviderErrorBody, status: number) => boolean
 
 export function parseProviderErrorBody(text: string): ProviderErrorBody {
   let parsed: unknown
@@ -74,7 +97,7 @@ export function parseProviderErrorBody(text: string): ProviderErrorBody {
     const value = inner[key]
     return typeof value === 'string' || typeof value === 'number' ? String(value) : undefined
   }
-  return { code: pick('code'), type: pick('type'), message: pick('message') }
+  return { code: pick('code'), type: pick('type'), message: pick('message'), error: inner }
 }
 
 /**
@@ -87,7 +110,7 @@ export function classifyHttpError(
   status: number,
   bodyText: string,
   retryAfterHeader: string | null,
-  isContentPolicy: (body: ProviderErrorBody) => boolean,
+  isContentPolicy: ContentPolicyRule,
 ): ImageModelError {
   const body = parseProviderErrorBody(bodyText)
   const detail = truncate(body.message ?? bodyText)
@@ -99,9 +122,11 @@ export function classifyHttpError(
       retryAfterMs: parseRetryAfter(retryAfterHeader),
     })
   }
+  // Checked before the retryable branches: a gateway can forward an upstream
+  // safety rejection with a 5xx status, and retrying it cannot succeed.
+  if (isContentPolicy(body, status)) return new ImageModelError('content_policy', message, false, options)
   if (status === 408) return new ImageModelError('timeout', message, true, options)
   if (status >= 500) return new ImageModelError('api_error', message, true, options)
-  if (isContentPolicy(body)) return new ImageModelError('content_policy', message, false, options)
   return new ImageModelError('invalid_request', message, false, options)
 }
 
@@ -116,7 +141,7 @@ export async function sendImageRequest(
   url: string,
   init: RequestInit,
   signal: AbortSignal,
-  isContentPolicy: (body: ProviderErrorBody) => boolean,
+  isContentPolicy: ContentPolicyRule,
 ): Promise<unknown> {
   let response: Response
   let text: string

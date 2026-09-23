@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ImageModelError } from '../src/errors.js'
 import { OpenAIImageAdapter } from '../src/image/openai.js'
+import { OpenRouterImageAdapter } from '../src/image/openrouter.js'
 import { runImage } from '../src/image/run-image.js'
 import { SeedreamImageAdapter } from '../src/image/seedream.js'
 import type { ImageRequest } from '../src/image/types.js'
@@ -102,6 +103,26 @@ describe('OpenAIImageAdapter', () => {
     const form = fetchMock.mock.calls[0]![1]?.body as FormData
     expect(form.getAll('image')).toHaveLength(1)
     expect(form.getAll('image[]')).toHaveLength(0)
+  })
+
+  it('rejects providerOptions that would replace adapter-set fields', () => {
+    for (const key of ['model', 'prompt', 'n', 'image', 'image[]', 'mask']) {
+      expect(() => new OpenAIImageAdapter({ model: 'm', apiKey: 'k', providerOptions: { [key]: 'x' } }))
+        .toThrow(`openai providerOptions cannot set ${key}`)
+    }
+  })
+
+  it('treats a size in providerOptions as a default that request.size overrides, without a duplicate field', async () => {
+    const fetchMock = stubFetch(
+      jsonResponse({ data: [{ b64_json: b64(pngHeader(8, 8)) }] }),
+      jsonResponse({ data: [{ b64_json: b64(pngHeader(8, 8)) }] }),
+    )
+    const custom = new OpenAIImageAdapter({ model: 'm', apiKey: 'k', providerOptions: { size: '1024x1024' } })
+    await custom.generate({ prompt: 'x', images: [input(pngHeader(4, 4))] }, { signal })
+    await custom.generate({ prompt: 'x', images: [input(pngHeader(4, 4))], size: '1536x1024' }, { signal })
+    const forms = fetchMock.mock.calls.map(([, init]) => init?.body as FormData)
+    expect(forms[0]!.getAll('size')).toEqual(['1024x1024'])
+    expect(forms[1]!.getAll('size')).toEqual(['1536x1024'])
   })
 
   it('refuses more images than maxInputImages without calling the API', async () => {
@@ -214,16 +235,28 @@ describe('SeedreamImageAdapter', () => {
     expect(typeof body.image).toBe('string')
   })
 
-  it('does not let providerOptions switch the output to a URL', async () => {
+  it('sends free providerOptions and rejects ones that would replace adapter-set fields', async () => {
     const fetchMock = stubFetch(jsonResponse({ data: [{ b64_json: b64(jpegHeader(8, 8)) }] }))
-    const custom = new SeedreamImageAdapter({
-      model: 'm',
-      apiKey: 'k',
-      providerOptions: { seed: 7, response_format: 'url' },
-    })
+    await new SeedreamImageAdapter({ model: 'm', apiKey: 'k', providerOptions: { seed: 7 } }).generate({ prompt: 'x' }, { signal })
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toMatchObject({ seed: 7, response_format: 'b64_json' })
+
+    for (const key of ['response_format', 'image', 'prompt', 'model']) {
+      expect(() => new SeedreamImageAdapter({ model: 'm', apiKey: 'k', providerOptions: { [key]: 'x' } }))
+        .toThrow(`seedream providerOptions cannot set ${key}`)
+    }
+  })
+
+  it('treats size and watermark in providerOptions as defaults, with request.size taking precedence', async () => {
+    const fetchMock = stubFetch(
+      jsonResponse({ data: [{ b64_json: b64(jpegHeader(8, 8)) }] }),
+      jsonResponse({ data: [{ b64_json: b64(jpegHeader(8, 8)) }] }),
+    )
+    const custom = new SeedreamImageAdapter({ model: 'm', apiKey: 'k', providerOptions: { size: '2k', watermark: true } })
     await custom.generate({ prompt: 'x' }, { signal })
-    const body = JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))
-    expect(body).toMatchObject({ seed: 7, response_format: 'b64_json' })
+    await custom.generate({ prompt: 'x', size: '4k' }, { signal })
+    const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)))
+    expect(bodies[0]).toMatchObject({ size: '2k', watermark: true })
+    expect(bodies[1]).toMatchObject({ size: '4k', watermark: true })
   })
 
   it('refuses a mask instead of dropping it', async () => {
@@ -249,6 +282,165 @@ describe('SeedreamImageAdapter', () => {
     )
     expect(await failure(adapter().generate({ prompt: 'x' }, { signal }))).toMatchObject({ type: 'content_policy', retryable: false })
     expect(await failure(adapter().generate({ prompt: 'x' }, { signal }))).toMatchObject({ type: 'invalid_output', retryable: true, providerCode: 'InternalError' })
+  })
+})
+
+describe('OpenRouterImageAdapter', () => {
+  const adapter = () => new OpenRouterImageAdapter({
+    model: 'openai/gpt-image-1',
+    apiKey: 'or-test',
+    providerOptions: { aspect_ratio: '4:3', provider: { order: ['openai'] } },
+  })
+
+  it('sends input images as input_references data URLs to /images', async () => {
+    const first = pngHeader(4, 4)
+    const fetchMock = stubFetch(jsonResponse({ data: [{ b64_json: b64(pngHeader(1024, 768)) }], usage: { total_tokens: 9 } }))
+
+    const output = await adapter().generate(
+      { prompt: 'swap the chair', images: [input(first), input(jpegHeader(4, 4), 'image/jpeg')], size: '1024x768' },
+      { signal },
+    )
+
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://openrouter.ai/api/v1/images')
+    expect((init?.headers as Record<string, string>)['Authorization']).toBe('Bearer or-test')
+    const body = JSON.parse(String(init?.body))
+    expect(body).toMatchObject({
+      model: 'openai/gpt-image-1',
+      prompt: 'swap the chair',
+      n: 1,
+      size: '1024x768',
+      aspect_ratio: '4:3',
+      provider: { order: ['openai'] },
+    })
+    expect(body.input_references).toEqual([
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${b64(first)}` } },
+      { type: 'image_url', image_url: { url: expect.stringMatching(/^data:image\/jpeg;base64,/) } },
+    ])
+    expect(output.params).toMatchObject({ inputImages: 2, usage: { total_tokens: 9 } })
+  })
+
+  it('rejects providerOptions that would replace the prompt or the input images', () => {
+    expect(() => new OpenRouterImageAdapter({
+      model: 'm',
+      apiKey: 'k',
+      providerOptions: { input_references: [], prompt: 'other' },
+    })).toThrow('openrouter providerOptions cannot set input_references, prompt')
+  })
+
+  it('treats a size in providerOptions as a default that request.size overrides', async () => {
+    const fetchMock = stubFetch(
+      jsonResponse({ data: [{ b64_json: b64(pngHeader(8, 8)) }] }),
+      jsonResponse({ data: [{ b64_json: b64(pngHeader(8, 8)) }] }),
+    )
+    const custom = new OpenRouterImageAdapter({ model: 'm', apiKey: 'k', providerOptions: { size: '1024x1024' } })
+    await custom.generate({ prompt: 'x' }, { signal })
+    await custom.generate({ prompt: 'x', size: '1536x1024' }, { signal })
+    const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)))
+    expect(bodies.map(body => body.size)).toEqual(['1024x1024', '1536x1024'])
+  })
+
+  it('omits input_references for text-to-image', async () => {
+    const fetchMock = stubFetch(jsonResponse({ data: [{ b64_json: b64(pngHeader(8, 8)) }] }))
+    await adapter().generate({ prompt: 'a desk' }, { signal })
+    const body = JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))
+    expect(body).not.toHaveProperty('input_references')
+  })
+
+  it('refuses a mask instead of dropping it', async () => {
+    const fetchMock = stubFetch()
+    const error = await failure(adapter().generate(
+      { prompt: 'x', images: [input(pngHeader(4, 4))], mask: input(pngHeader(4, 4)) },
+      { signal },
+    ))
+    expect(error).toMatchObject({ type: 'invalid_request', retryable: false })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('classifies an OpenRouter moderation 403 as content_policy', async () => {
+    stubFetch(jsonResponse({
+      error: {
+        code: 403,
+        message: 'Your chosen model requires moderation and your input was flagged',
+        metadata: { reasons: ['sexual'], flagged_input: 'x', provider_name: 'OpenAI', model_slug: 'openai/gpt-image-1' },
+      },
+    }, 403))
+    const error = await failure(adapter().generate({ prompt: 'x' }, { signal }))
+    expect(error).toMatchObject({ type: 'content_policy', retryable: false, status: 403, provider: 'openrouter' })
+  })
+
+  it('classifies an upstream rejection forwarded in metadata.raw as content_policy', async () => {
+    stubFetch(
+      jsonResponse({
+        error: {
+          code: 400,
+          message: 'Provider returned error',
+          metadata: { provider_name: 'OpenAI', raw: JSON.stringify({ error: { code: 'moderation_blocked', message: 'rejected' } }) },
+        },
+      }, 400),
+      jsonResponse({
+        error: {
+          code: 400,
+          message: 'Provider returned error',
+          metadata: { provider_name: 'ByteDance', raw: { error: { code: 'OutputImageSensitiveContentDetected' } } },
+        },
+      }, 400),
+    )
+    expect(await failure(adapter().generate({ prompt: 'x' }, { signal }))).toMatchObject({ type: 'content_policy', retryable: false })
+    expect(await failure(adapter().generate({ prompt: 'x' }, { signal }))).toMatchObject({ type: 'content_policy', retryable: false })
+  })
+
+  it('classifies an upstream rejection forwarded with a 5xx status as content_policy, not a retryable api_error', async () => {
+    stubFetch(
+      jsonResponse({
+        error: {
+          code: 502,
+          message: 'Provider returned error',
+          metadata: { provider_name: 'OpenAI', raw: JSON.stringify({ error: { code: 'moderation_blocked' } }) },
+        },
+      }, 502),
+      jsonResponse({ error: { code: 502, message: 'Provider returned error', metadata: { provider_name: 'OpenAI' } } }, 502),
+    )
+    expect(await failure(adapter().generate({ prompt: 'x' }, { signal }))).toMatchObject({ type: 'content_policy', retryable: false, status: 502 })
+    expect(await failure(adapter().generate({ prompt: 'x' }, { signal }))).toMatchObject({ type: 'api_error', retryable: true, status: 502 })
+  })
+
+  it('classifies an upstream rejection reported in metadata.provider_code as content_policy', async () => {
+    stubFetch(jsonResponse({
+      error: { code: 400, message: 'Provider returned error', metadata: { provider_name: 'OpenAI', provider_code: 'moderation_blocked' } },
+    }, 400))
+    const error = await failure(adapter().generate({ prompt: 'x' }, { signal }))
+    expect(error).toMatchObject({ type: 'content_policy', retryable: false })
+  })
+
+  it('treats other 4xx, including a 403 without moderation metadata, as invalid_request', async () => {
+    stubFetch(
+      jsonResponse({ error: { code: 402, message: 'Insufficient credits' } }, 402),
+      jsonResponse({ error: { code: 403, message: 'Key disabled' } }, 403),
+      jsonResponse({ error: { code: 400, message: 'bad', metadata: { raw: 'not json' } } }, 400),
+      jsonResponse({ error: { code: 400, message: 'bad', metadata: { provider_code: 'invalid_size' } } }, 400),
+    )
+    for (let i = 0; i < 4; i++) {
+      expect(await failure(adapter().generate({ prompt: 'x' }, { signal }))).toMatchObject({ type: 'invalid_request', retryable: false })
+    }
+  })
+
+  it('treats an empty data array as a retryable invalid_output', async () => {
+    stubFetch(jsonResponse({ data: [] }))
+    const error = await failure(adapter().generate({ prompt: 'x' }, { signal }))
+    expect(error).toMatchObject({ type: 'invalid_output', retryable: true })
+  })
+
+  it('fails without a network call when the egress policy denies OpenRouter', async () => {
+    const fetchMock = stubFetch()
+    const guarded = new OpenRouterImageAdapter({
+      model: 'm',
+      apiKey: 'k',
+      egressPolicy: { mode: 'allowlist', allowedOrigins: ['https://api.openai.com'] },
+    })
+    const error = await failure(guarded.generate({ prompt: 'x' }, { signal }))
+    expect(error).toMatchObject({ type: 'invalid_request', retryable: false })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 
