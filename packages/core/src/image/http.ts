@@ -5,6 +5,7 @@
 import { EgressPolicyError, ImageModelError } from '../errors.js'
 import { createEgressFetch } from '../llm/egress.js'
 import type { EgressPolicy } from '../types.js'
+import { sniffImage } from './sniff.js'
 import type { ImageInput } from './types.js'
 
 type FetchLike = typeof globalThis.fetch
@@ -37,6 +38,16 @@ export function assertNoReservedOptions(
       `${provider} providerOptions cannot set ${clashes.join(', ')}; the adapter sets ${clashes.length === 1 ? 'it' : 'them'} from the request or its own options`,
     )
   }
+}
+
+/**
+ * The media type of returned image bytes, read from the bytes themselves.
+ * Providers let callers pick the output format through `providerOptions`, so a
+ * fixed declaration would be wrong for a direct adapter caller. `fallback` is
+ * used only when the bytes are not a recognized image.
+ */
+export function detectedMediaType(bytes: Uint8Array, fallback: string): string {
+  return sniffImage(bytes)?.mediaType ?? fallback
 }
 
 /** Join a base URL and a path without doubling or dropping the slash. */
@@ -173,6 +184,53 @@ export async function sendImageRequest(
       { provider, status: response.status },
     )
   }
+}
+
+/**
+ * Download raw image bytes, for providers that deliver output by URL. Error
+ * handling matches {@link sendImageRequest}; any non-2xx status is a retryable
+ * failure, since a delivery link that fails is not a verdict on the request.
+ * 429 and 408 are typed `rate_limit` and `timeout`, the rest `api_error`.
+ */
+export async function downloadImage(
+  fetchImpl: FetchLike,
+  provider: string,
+  url: string,
+  init: RequestInit,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
+  let response: Response
+  let bytes: ArrayBuffer
+  try {
+    response = await fetchImpl(url, { ...init, signal })
+    bytes = await response.arrayBuffer()
+  } catch (error) {
+    if (signal.aborted) throw error
+    if (error instanceof EgressPolicyError) {
+      throw new ImageModelError('invalid_request', error.message, false, { provider })
+    }
+    throw new ImageModelError(
+      'network',
+      `${provider} image download failed: ${error instanceof Error ? error.message : String(error)}`,
+      true,
+      { provider },
+    )
+  }
+  if (!response.ok) {
+    const message = `${provider} image download returned HTTP ${response.status}`
+    const options = { provider, status: response.status }
+    // Rate limits and timeouts keep their own types so a caller can tell them
+    // from a dead link and retry the download in place.
+    if (response.status === 429) {
+      throw new ImageModelError('rate_limit', message, true, {
+        ...options,
+        retryAfterMs: parseRetryAfter(response.headers.get('retry-after')),
+      })
+    }
+    if (response.status === 408) throw new ImageModelError('timeout', message, true, options)
+    throw new ImageModelError('api_error', message, true, options)
+  }
+  return new Uint8Array(bytes)
 }
 
 /** Decode the first `b64_json` entry of an OpenAI-shaped `data` array. */

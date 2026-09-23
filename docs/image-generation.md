@@ -71,8 +71,20 @@ When every model fails, `runImage()` resolves with `status: 'failed'` and the
 last error; it does not throw. It rejects only for invalid options or when the
 caller's `signal` aborts, in which case no further model is tried.
 
-Adapters must not retry internally. Every provider call is one attempt, so the
-attempt records show the real number of calls and their cost.
+Adapters must not resubmit a generation internally. Every billable provider
+call is one attempt, so the attempt records show the real number of calls and
+their cost. An adapter for an asynchronous provider may retry a status poll or
+the result download of a task it already submitted, since that costs nothing
+and a resubmit would pay for a second task.
+
+When the attempt deadline fires, `runImage()` aborts the adapter's signal with
+a `DOMException` named `TimeoutError`, the same convention as
+`AbortSignal.timeout()`; a caller cancellation carries the caller's own
+reason. `runImage()` normally records a deadline as a retryable `timeout`. An
+adapter can make it final by throwing a non-retryable `ImageModelError`, and
+`runImage()` keeps that verdict and moves to the next model. The Black Forest
+Labs adapter does this once its task is submitted, so an outage past the
+deadline never pays for a second task.
 
 ## Error types
 
@@ -82,7 +94,7 @@ flag. The built-in adapters classify responses as follows:
 | Type | Built-in adapters raise it for | Retryable |
 |---|---|---|
 | `rate_limit` | HTTP 429, with `retryAfterMs` from Retry-After | Yes |
-| `timeout` | HTTP 408, or the attempt deadline firing | Yes |
+| `timeout` | HTTP 408, or the attempt deadline firing | Yes, unless the adapter marks it final (see [Retry and fallback](#retry-and-fallback)) |
 | `api_error` | HTTP 5xx; any non-`ImageModelError` thrown by an adapter | 5xx yes, other no |
 | `network` | A transport failure before a response | Yes |
 | `content_policy` | The provider's own safety rejection code (see below) | No |
@@ -98,7 +110,10 @@ carrying OpenRouter's moderation metadata (`reasons` or `flagged_input`), and
 an upstream error whose code, in `error.metadata.provider_code` or in the
 original body in `error.metadata.raw`, one of the two rules above recognizes.
 These rules run before the timeout and 5xx rules, so a rejection a gateway
-forwards with a 5xx status is not retried. Anything else lands in
+forwards with a 5xx status is not retried. The Black Forest Labs adapter
+reports a task whose poll status is `Request Moderated` or
+`Content Moderated` as soon as it sees it, instead of polling on until the
+attempt deadline. Anything else lands in
 `invalid_request`, which is also non-retryable, so an unrecognized rejection
 still moves to the next model rather than being retried.
 
@@ -117,8 +132,10 @@ An exception thrown by `validate` propagates out of `runImage()`.
 each record as soon as the attempt ends. A record carries the provider, model,
 start time, duration, status (`succeeded`, `rejected`, or `failed`), error type
 and message, the adapter's reported parameters and usage, and the output format
-and size. Records never contain credentials; only `rejectedOutput` carries image
-bytes.
+and size. A failed attempt carries parameters only when the adapter attached
+them to its `ImageModelError` as `params`, for example the task ID and cost of
+work the provider already accepted. Records never contain credentials; only
+`rejectedOutput` carries image bytes.
 
 `onAttempt` is not awaited, and a throw or rejection from it is ignored: a
 failing or stalled log sink neither changes nor delays the result. Write each
@@ -130,21 +147,26 @@ record to durable storage from the callback if you need it to survive a crash;
 | Adapter | Endpoint | Credentials | Notes |
 |---|---|---|---|
 | `OpenAIImageAdapter` | `POST /images/generations` without images, `POST /images/edits` (multipart) with images | `apiKey` or `OPENAI_API_KEY`; `baseURL` or `OPENAI_BASE_URL` | Reads `data[0].b64_json` and never downloads a returned URL, so it targets models that return base64, such as the `gpt-image` family. Works with OpenAI-compatible endpoints through `baseURL`. |
+| `BlackForestLabsImageAdapter` | `POST /{model}` on Black Forest Labs, then the returned `polling_url`, then the `result.sample` URL | `apiKey` or `BFL_API_KEY` | Asynchronous: polls every `pollIntervalMs` (default 500) until the task is ready, bounded by the `runImage()` attempt deadline. Transient failures while polling or downloading are retried inside the same attempt, up to the caller's `maxRetryAfterMs`. Every other failure after the submit, including a failed or lost task, an expired result link, and the deadline, ends this model's turn as non-retryable, so a submitted task is never paid for twice; the failed attempt record keeps the task ID and reported cost. A caller that cancels a direct `generate()` call gets its own abort reason back. Sends input images as `input_image`, `input_image_2`, and so on, and `size` as `width` and `height` (other formats are refused; use `providerOptions.aspect_ratio`). The key goes to the configured origin and, only when `baseURL` is itself a BFL host, to other HTTPS hosts under `bfl.ai`, so a proxy's key never follows a forwarded BFL URL. Keyed requests refuse redirects, and the pre-signed image download carries no key. Rejects a mask. Not checked against live responses. |
 | `OpenRouterImageAdapter` | `POST /images` on OpenRouter | `apiKey` or `OPENROUTER_API_KEY` | Sends input images as `input_references` data URLs and reads `data[0].b64_json`. OpenRouter's request shape differs from the OpenAI Images API, so `OpenAIImageAdapter` with an OpenRouter `baseURL` does not work. Rejects a mask. Its classification follows OpenRouter's documented error format and has not been checked against live responses. |
 | `SeedreamImageAdapter` | `POST /images/generations` on Volcengine Ark | `apiKey` or `ARK_API_KEY` | Same endpoint and key as the Doubao text adapter. Sends input images as data URLs, always requests `b64_json`, and sets `watermark: false` unless configured. Rejects a mask. |
 
-All three accept `providerOptions` for extra body fields, such as `quality` or
-`moderation` for OpenAI, `aspect_ratio` or a `provider` routing object for
-OpenRouter, and `seed` for Seedream, and `maxInputImages` to fail over-long
-requests before any network call. A `size` in `providerOptions` is a default
-that `request.size` overrides. A key that carries the request itself, such as
-`model`, `prompt`, or the field that holds input images, is rejected with a
-`TypeError` when the adapter is constructed, so an option can never silently
-replace the prompt or the images.
+All built-in adapters accept `providerOptions` for extra body fields, such as
+`quality` or `moderation` for OpenAI, `aspect_ratio` or a `provider` routing
+object for OpenRouter, `seed` for Seedream, and `output_format` or
+`safety_tolerance` for Black Forest Labs, and `maxInputImages` to fail
+over-long requests before any network call. A `size` in `providerOptions`
+(`width` and `height` for Black Forest Labs) is a default that `request.size`
+overrides. A key that carries the request itself, such as `model`, `prompt`,
+or the field that holds input images, is rejected with a `TypeError` when the
+adapter is constructed, so an option can never silently replace the prompt or
+the images.
 
-All three honor `egressPolicy` the same way the text adapters do: every request is
-checked against the policy and redirects are rejected. See
-[LLM egress policy](egress-policy.md).
+All built-in adapters honor `egressPolicy` the same way the text adapters do:
+every request is checked against the policy and redirects are rejected. Black
+Forest Labs polls and delivers from hosts other than its API origin, so an
+allowlist for it must also include the polling and delivery origins its
+responses name. See [LLM egress policy](egress-policy.md).
 
 ## Writing an adapter
 
@@ -172,7 +194,11 @@ const myAdapter: ImageModelAdapter = {
 Forward `signal` to every request so deadlines and cancellation stop the call.
 Throw `ImageModelError` for every failure you can classify; anything else is
 recorded as a non-retryable `api_error`. Fail rather than truncate when the
-provider cannot use every input image, and do not retry inside the adapter.
+provider cannot use every input image, and do not resubmit a generation inside
+the adapter. An adapter that waits internally should not wait longer than
+`options.maxRetryAfterMs`, which `runImage()` sets to its own cap. Attach
+`params` to an `ImageModelError` when the provider already accepted billable
+work, so the failed attempt still shows it.
 
 ## What is not covered
 

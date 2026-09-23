@@ -32,8 +32,18 @@ export interface ImageRequest {
 
 /** Per-call options `runImage` passes to an adapter. */
 export interface ImageCallOptions {
-  /** Aborts when the attempt times out or the caller cancels. Adapters must forward it to I/O. */
+  /**
+   * Aborts when the attempt times out or the caller cancels. Adapters must
+   * forward it to I/O. A deadline set by `runImage` aborts with a
+   * `DOMException` named `TimeoutError`; any other reason is a cancellation.
+   */
   readonly signal: AbortSignal
+  /**
+   * Longest Retry-After the caller is willing to wait, in ms. An adapter that
+   * waits internally (for example while polling a task) should fail instead of
+   * waiting longer. `runImage` passes its own `maxRetryAfterMs`.
+   */
+  readonly maxRetryAfterMs?: number
 }
 
 /** What an adapter returns for one successful call. */
@@ -56,8 +66,10 @@ export interface ImageModelAdapter {
   readonly model: string
   /**
    * Run one call. Failures should throw {@link ImageModelError}; anything else
-   * is recorded as a non-retryable `api_error`. Must not retry internally, so
-   * every provider call shows up as its own attempt.
+   * is recorded as a non-retryable `api_error`. Must not resubmit a
+   * generation internally, so every billable call shows up as its own
+   * attempt. Retrying a status poll or download for a task already submitted
+   * is fine, and avoids paying for a second task.
    */
   generate(request: ImageRequest, options: ImageCallOptions): Promise<ImageModelOutput>
 }
