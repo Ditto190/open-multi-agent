@@ -268,6 +268,40 @@ describe('LLMTaskProfiler', () => {
       extraBody: { thinking: { type: 'disabled' } },
     })
   })
+
+  it.each([
+    ['claude-sonnet-5', undefined],
+    ['claude-opus-4-7', undefined],
+    ['claude-sonnet-4-6', 0],
+    ['claude-haiku-4-5', 0],
+  ])('sends temperature only to Claude models that accept it (%s)', async (model, temperature) => {
+    const mockAdapter = {
+      ...adapter(JSON.stringify({
+        evidenceSources: 'single',
+        independentReview: 'none',
+        conflictingObjectives: false,
+        sideEffectIntent: 'none',
+        permissionIsolation: 'none',
+        decomposable: false,
+        parallelizable: false,
+        complexity: 'low',
+        confidence: 0.95,
+        reasons: ['The task is a bounded classification request.'],
+      })),
+      name: 'anthropic',
+    }
+    const taskProfiler = new LLMTaskProfiler({
+      adapter: mockAdapter,
+      model,
+    })
+
+    await taskProfiler.profile({
+      goal: 'Summarize this note.',
+      roster: [{ name: 'alpha', model }],
+    })
+
+    expect(mockAdapter.chat.mock.calls[0]?.[1]?.temperature).toBe(temperature)
+  })
 })
 
 describe('hybrid runTeam routing', () => {
